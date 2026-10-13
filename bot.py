@@ -1,1036 +1,955 @@
-import telebot
-from telebot import types
-import subprocess
-import os
-import sys
-import psutil
+#!/usr/bin/env python3
+"""
+===============================================================================
+RIZO X NB TECH Hype V10.7 — Ultimate Bot & Project Hosting Platform
+Part 1: Core System Engine, SQLite Schema, User/Credit Management, Base Models
+===============================================================================
+"""
+
+from __future__ import annotations
+
+import asyncio
+import datetime
+import hashlib
+import html
 import json
+import logging
+import os
+import platform
+import re
+import shutil
+import signal
+import sqlite3
+import subprocess
+import sys
 import time
+import zipfile
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
-# ----------------- ENVIRONMENT VARIABLES -----------------
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-OWNER_ID_ENV = os.getenv("OWNER_ID")
+from telegram import (
+    InlineKeyboardButton as TelegramInlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton as TelegramKeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    Update,
+)
+from telegram.constants import ParseMode
+from telegram.error import BadRequest, Forbidden, TelegramError
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
-if not BOT_TOKEN:
-    sys.exit("[CRITICAL ERROR] 'BOT_TOKEN' environment variable is missing! Please configure it in Railway.")
+# ═════════════════════════════════════════════════════════════════════════════
+# GLOBAL CONSTANTS & CONFIGURATION (DIRECT EMBEDDED - NO .ENV NEEDED)
+# ═════════════════════════════════════════════════════════════════════════════
 
-if not OWNER_ID_ENV:
-    sys.exit("[CRITICAL ERROR] 'OWNER_ID' environment variable is missing! Please configure it in Railway.")
+BOT_TOKEN = "8931197214:AAFx97EUZ3fp5YirZKZ6EZq6ZLz2-3ajZqg"
+OWNER_ID = 7638086103
 
-try:
-    OWNER_ID = int(OWNER_ID_ENV)
-except ValueError:
-    sys.exit("[CRITICAL ERROR] 'OWNER_ID' must be a valid integer Telegram user ID!")
+BRAND_NAME = "RIZO X NB TECH"
+OWNER_NAME = "RIZO$ BADSHAH"
+VERSION = "10.7 (Hype Ultimate)"
 
-bot = telebot.TeleBot(BOT_TOKEN)
+CHANNEL_LINKS = [
+    "https://t.me/rizoxnbtech",
+    "https://t.me/rizoxbots",
+    "https://t.me/rizoxbots",
+    "https://t.me/premimumxfree",
+]
+CHANNEL_USERNAMES = ["@rizoxnbtech", "@BADSHAHATECH_channel", "@rizoxbots", "@premimumxfree"]
+CHANNEL_NAMES = ["RIZO X NB TECH", "NB tech", "RIZO X NB TECH BOTS", "RIZO X NB TECH Premium"]
 
-USERS_FILE = "allowed_users.json"
-CONFIG_FILE = "bot_config.json"
-MAX_CHANNELS = 10
+MAX_FILE_MB = 50
+MAX_ZIP_EXPANDED_MB = 250
+DEFAULT_CREDITS = 5
+CREDIT_PER_UPLOAD = 1
+PREMIUM_BONUS_CREDITS = 100
 
-current_dir = os.getcwd()
-bg_processes = {}
-waiting_for_channel_forward = set()  # Owner state waiting for channel forward
-pending_requests = set()             # User IDs with active approval request sent to admin
+DAILY_UPLOAD_LIMIT_FREE = 3
+DAILY_UPLOAD_LIMIT_PREMIUM = 50
+MAX_RUNNING_FREE = 2
+MAX_RUNNING_PREMIUM = 15
+
+MAX_LOG_CHARS = 4000
+AUTO_INSTALL_DEPENDENCIES = True
+ENFORCE_RESOURCE_LIMITS = False
+FORCE_JOIN_ENABLED = True
+AUTO_RESTART_ENABLED = True
+MAINTENANCE_MODE_DEFAULT = False
+
+BASE_DIR = Path(__file__).resolve().parent
+DOWNLOADS_DIR = BASE_DIR / "downloads"
+PROJECTS_DIR = BASE_DIR / "projects_data"
+LOGS_DIR = BASE_DIR / "process_logs"
+DATA_FILE = BASE_DIR / "bot_data.json"
+DB_FILE = BASE_DIR / "RIZO_v10.db"
+
+DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 START_TIME = time.time()
 
-# ----------------- ESCAPE / SANITIZATION HELPERS -----------------
-
-def escape_markdown(text):
-    """
-    Escapes Telegram legacy Markdown special characters (*, _, `, [).
-    Prevents 'can't parse entities' errors when usernames or names contain symbols.
-    """
-    if not text:
-        return ""
-    chars = ['*', '_', '`', '[']
-    for ch in chars:
-        text = text.replace(ch, f"\\{ch}")
-    return text
-
-# ----------------- STORAGE HELPERS -----------------
-
-def load_users():
-    if os.path.exists(USERS_FILE):
-        try:
-            with open(USERS_FILE, "r") as f:
-                return set(json.load(f))
-        except Exception:
-            return {OWNER_ID}
-    return {OWNER_ID}
-
-def save_users(users_set):
-    with open(USERS_FILE, "w") as f:
-        json.dump(list(users_set), f)
-
-def load_config():
-    default_config = {"required_channels": []}
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r") as f:
-                data = json.load(f)
-                if "required_channel_id" in data and data["required_channel_id"]:
-                    data["required_channels"] = [{
-                        "id": data["required_channel_id"],
-                        "title": data.get("required_channel_title") or "Required Channel",
-                        "username": data.get("required_channel_username"),
-                        "invite_link": data.get("required_channel_invite_link")
-                    }]
-                if "required_channels" not in data:
-                    data["required_channels"] = []
-                return data
-        except Exception:
-            return default_config
-    return default_config
-
-def save_config(cfg):
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(cfg, f, indent=4)
-
-allowed_users = load_users()
-bot_config = load_config()
-
-# ----------------- VERIFICATION HELPERS -----------------
-
-def is_owner(user_id):
-    return user_id == OWNER_ID
-
-def is_allowed_user(user_id):
-    return user_id in allowed_users or user_id == OWNER_ID
-
-def check_channel_subscriptions(user_id):
-    """
-    Checks if a user is subscribed to ALL configured channels (up to 10).
-    Returns: (is_all_joined: bool, missing_channels: list of dicts)
-    """
-    if is_owner(user_id):
-        return True, []
-
-    channels = bot_config.get("required_channels", [])
-    if not channels:
-        return True, []
-
-    missing = []
-    for ch in channels:
-        ch_id = ch.get("id")
-        try:
-            member = bot.get_chat_member(ch_id, user_id)
-            if member.status not in ['member', 'administrator', 'creator']:
-                missing.append(ch)
-        except Exception as e:
-            print(f"[!] Error checking channel {ch_id}: {e}")
-            missing.append(ch)
-
-    return (len(missing) == 0), missing
-
-def get_join_channels_keyboard(missing_channels):
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    for i, ch in enumerate(missing_channels, 1):
-        link = ch.get("invite_link")
-        title = ch.get("title", f"Channel {i}")
-        if link:
-            markup.add(types.InlineKeyboardButton(f"📢 Join {title}", url=link))
-    markup.add(types.InlineKeyboardButton("🔄 Verify Membership", callback_data="verify_membership"))
-    return markup
-
-def get_uptime():
-    uptime_seconds = int(time.time() - START_TIME)
-    days = uptime_seconds // 86400
-    hours = (uptime_seconds % 86400) // 3600
-    minutes = (uptime_seconds % 3600) // 60
-    seconds = uptime_seconds % 60
-    return f"{days}d {hours}h {minutes}m {seconds}s"
-
-# ----------------- UI / KEYBOARDS -----------------
-
-def get_main_menu_keyboard(user_id):
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    
-    btn_status = types.InlineKeyboardButton("⏳ Status", callback_data="btn_status")
-    btn_vitals = types.InlineKeyboardButton("🧬 Vitals", callback_data="btn_sysinfo")
-    btn_ram = types.InlineKeyboardButton("🧠 RAM", callback_data="btn_memory")
-    btn_disk = types.InlineKeyboardButton("💽 Disk", callback_data="btn_disk")
-    btn_ps = types.InlineKeyboardButton("⚙️ Engines (PS)", callback_data="btn_ps")
-    btn_myid = types.InlineKeyboardButton("🪪 My ID", callback_data="btn_myid")
-    btn_help = types.InlineKeyboardButton("📖 Help Guide", callback_data="btn_help")
-
-    markup.add(btn_status, btn_vitals)
-    markup.add(btn_ram, btn_disk)
-    markup.add(btn_ps, btn_myid)
-
-    if is_owner(user_id):
-        btn_channel = types.InlineKeyboardButton("📢 Channel Manager", callback_data="btn_channel_info")
-        btn_users = types.InlineKeyboardButton("👥 Users List", callback_data="btn_list_users")
-        markup.add(btn_channel, btn_users)
-
-    markup.add(btn_help)
-    return markup
-
-def get_back_keyboard():
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("🔙 Back to Main Menu", callback_data="btn_main_menu"))
-    return markup
-
-def get_help_text():
-    channels = bot_config.get("required_channels", [])
-    count = len(channels)
-    return f"""⚡️ *DEV X HOST | NEON TERMINAL* ⚡️
-*═════════════════════════*
-Welcome to the core system. You have full terminal access. 🚀
-
-💻 *TERMINAL ACTIONS:*
-▪️ Direct commands (`ls`, `mkdir`, `git status`)
-▪️ `cd <dir>` - Switch active directory 📂
-▪️ `pip install <pkg>` - Install Python package 💉
-▪️ `python <script.py>` - Execute scripts 🔥
-
-🗂 *FILE OPERATIONS:*
-▪️ Send document directly to bot - Uploads to active dir 📤
-▪️ `/download <filename>` - Download file from server 📥
-
-⚙️ *BACKGROUND ENGINES:*
-▪️ `/run <cmd>` - Start background engine 🟢
-▪️ `/stop <pid>` - Kill running engine 🛑
-▪️ `/ps` - List all active engines 📊
-
-🖥 *SYSTEM VITALS:*
-▪️ `/status` - Live uptime & overview ⏳
-▪️ `/sysinfo` - CPU & RAM utilization 🧬
-▪️ `/disk` - Storage details 💽
-▪️ `/memory` - RAM usage breakdown 🧠
-
-🔑 *ACCESS & CONTROL:*
-▪️ `/myid` - View your Telegram User ID 🪪
-▪️ `/menu` or `/start` - Interactive Dashboard 🎛
-▪️ `/channel` - Add channel via forward *(Max 10)* 📢
-▪️ `/channels` - View & remove channels *(Owner only)* 📋
-▪️ `/channel_del <id>` - Remove specific channel ❌
-▪️ `/add <id>` & `/remove <id>` - Whitelist access 👥
-
-🔒 *Active Channels:* `{count} / {MAX_CHANNELS}`
-*═════════════════════════*
-*SYSTEM READY >_* Type a command or use the buttons below:"""
-
-# ----------------- OWNER CHANNEL MANAGEMENT -----------------
-
-@bot.message_handler(commands=['channel'])
-def set_channel_prompt(message):
-    if not is_owner(message.from_user.id):
-        bot.reply_to(message, "💀 *[ACCESS DENIED]* Privilege escalation failed. Owner only.", parse_mode="Markdown")
-        return
-    
-    current_count = len(bot_config.get("required_channels", []))
-    if current_count >= MAX_CHANNELS:
-        bot.reply_to(
-            message,
-            f"⚠️ *[LIMIT REACHED]* You already have `{MAX_CHANNELS}` channels added!\n"
-            f"Use `/channels` or `/channel_del <id>` to remove one first.",
-            parse_mode="Markdown"
-        )
-        return
-
-    waiting_for_channel_forward.add(message.from_user.id)
-    text = (
-        f"📢 *[CHANNEL SETUP MODE]* ({current_count}/{MAX_CHANNELS} active)\n\n"
-        f"1. Make sure you add this bot as an **Administrator** in your channel with invite link permissions.\n"
-        f"2. **Forward any post/message from that channel to this chat right now.**\n\n"
-        f"Send `/cancel` at any time to cancel."
-    )
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("❌ Cancel Setup", callback_data="cancel_channel_setup"))
-    bot.reply_to(message, text, parse_mode="Markdown", reply_markup=markup)
-
-@bot.message_handler(commands=['channels'])
-def list_channels_cmd(message):
-    if not is_owner(message.from_user.id): return
-    show_channel_manager(message.chat.id, None)
-
-@bot.message_handler(commands=['channel_del'])
-def delete_channel_by_arg(message):
-    if not is_owner(message.from_user.id): return
-    args = message.text.split(" ")
-    if len(args) < 2:
-        bot.reply_to(message, "⚠️ *Format Error:*\nUse `/channel_del <channel_id>` or `/channels` to manage with buttons.", parse_mode="Markdown")
-        return
-    try:
-        del_id = int(args[1])
-        channels = bot_config.get("required_channels", [])
-        before = len(channels)
-        bot_config["required_channels"] = [c for c in channels if c.get("id") != del_id]
-        if len(bot_config["required_channels"]) < before:
-            save_config(bot_config)
-            bot.reply_to(message, f"✅ Removed channel `{del_id}`.", parse_mode="Markdown")
-        else:
-            bot.reply_to(message, f"❌ Channel ID `{del_id}` not found in list.", parse_mode="Markdown")
-    except ValueError:
-        bot.reply_to(message, "⚠️ Channel ID must be a numeric integer.")
-
-def show_channel_manager(chat_id, message_id=None):
-    channels = bot_config.get("required_channels", [])
-    markup = types.InlineKeyboardMarkup(row_width=1)
-
-    if not channels:
-        text = "📢 *[CHANNEL MANAGER]*\n\nNo required channels configured yet (0/10).\nSend `/channel` to add one!"
-    else:
-        text = f"📢 *[CHANNEL MANAGER]* ({len(channels)}/{MAX_CHANNELS} Active)\n\n"
-        for i, ch in enumerate(channels, 1):
-            clean_title = escape_markdown(ch.get('title', 'Channel'))
-            text += f"{i}. *{clean_title}*\n   ID: `{ch.get('id')}`\n   Link: {ch.get('invite_link') or 'None'}\n\n"
-            markup.add(types.InlineKeyboardButton(f"🗑 Remove: {ch.get('title', 'Channel')[:25]}", callback_data=f"del_ch_{ch.get('id')}"))
-
-    if len(channels) < MAX_CHANNELS:
-        markup.add(types.InlineKeyboardButton("➕ Add New Channel", callback_data="add_new_channel_btn"))
-    markup.add(types.InlineKeyboardButton("🔙 Back to Main Menu", callback_data="btn_main_menu"))
-
-    if message_id:
-        bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode="Markdown", reply_markup=markup)
-    else:
-        bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown", reply_markup=markup)
-
-@bot.message_handler(commands=['cancel'])
-def cancel_action(message):
-    if message.from_user.id in waiting_for_channel_forward:
-        waiting_for_channel_forward.remove(message.from_user.id)
-        bot.reply_to(message, "❌ Setup cancelled.")
-
-@bot.message_handler(commands=['add'])
-def add_user(message):
-    if not is_owner(message.from_user.id):
-        bot.reply_to(message, "💀 *[ACCESS DENIED]* Owner only.", parse_mode="Markdown")
-        return
-    try:
-        new_id = int(message.text.split(" ")[1])
-        allowed_users.add(new_id)
-        save_users(allowed_users)
-        bot.reply_to(message, f"⚡️ *[ACCESS GRANTED]*\nUser `{new_id}` added to authorized list! 🚀", parse_mode="Markdown")
-        try:
-            bot.send_message(new_id, "🎉 *[ACCESS APPROVED]*\nThe Admin has approved your terminal access! Type /start to begin.", parse_mode="Markdown")
-        except Exception:
-            pass
-    except Exception:
-        bot.reply_to(message, "⚠️ *Format Error:*\nUse: `/add <userid>`", parse_mode="Markdown")
-
-@bot.message_handler(commands=['remove'])
-def remove_user(message):
-    if not is_owner(message.from_user.id): return
-    try:
-        del_id = int(message.text.split(" ")[1])
-        if del_id == OWNER_ID:
-            bot.reply_to(message, "👑 *[SYSTEM ERROR]* Cannot disconnect the master owner! 🧠", parse_mode="Markdown")
-            return
-        if del_id in allowed_users:
-            allowed_users.remove(del_id)
-            save_users(allowed_users)
-            bot.reply_to(message, f"🗑 *[USER REMOVED]*\nUser `{del_id}` removed from authorized list! 🔌", parse_mode="Markdown")
-        else:
-            bot.reply_to(message, "⚠️ User ID not found in whitelist.")
-    except Exception:
-        bot.reply_to(message, "⚠️ *Format Error:*\nUse: `/remove <userid>`", parse_mode="Markdown")
-
-# ----------------- CHANNEL FORWARD CAPTURE (UP TO 10) -----------------
-
-@bot.message_handler(func=lambda msg: msg.from_user.id in waiting_for_channel_forward and msg.forward_from_chat is not None)
-def handle_channel_forward(message):
-    user_id = message.from_user.id
-    chat = message.forward_from_chat
-    waiting_for_channel_forward.discard(user_id)
-
-    if chat.type != 'channel':
-        bot.reply_to(message, "❌ The forwarded message must be from a **Channel**. Setup cancelled.", parse_mode="Markdown")
-        return
-
-    channels = bot_config.get("required_channels", [])
-    if len(channels) >= MAX_CHANNELS:
-        bot.reply_to(message, f"⚠️ Maximum limit of {MAX_CHANNELS} channels reached. Remove one first using `/channels`.", parse_mode="Markdown")
-        return
-
-    channel_id = chat.id
-    channel_title = chat.title or "Required Channel"
-    channel_username = chat.username
-
-    if any(c.get("id") == channel_id for c in channels):
-        bot.reply_to(message, f"⚠️ Channel *{escape_markdown(channel_title)}* (`{channel_id}`) is already in your required list!", parse_mode="Markdown")
-        return
-
-    invite_link = None
-    try:
-        chat_info = bot.get_chat(channel_id)
-        if chat_info.invite_link:
-            invite_link = chat_info.invite_link
-        elif channel_username:
-            invite_link = f"https://t.me/{channel_username}"
-        else:
-            link_obj = bot.create_chat_invite_link(channel_id)
-            invite_link = link_obj.invite_link
-    except Exception as e:
-        if channel_username:
-            invite_link = f"https://t.me/{channel_username}"
-        print(f"[!] Could not create or fetch invite link: {e}")
-
-    new_channel = {
-        "id": channel_id,
-        "title": channel_title,
-        "username": channel_username,
-        "invite_link": invite_link
-    }
-    channels.append(new_channel)
-    bot_config["required_channels"] = channels
-    save_config(bot_config)
-
-    clean_title = escape_markdown(channel_title)
-    success_text = (
-        f"✅ *[CHANNEL #{len(channels)} ADDED SUCCESSFULLY]*\n\n"
-        f"📌 *Title:* {clean_title}\n"
-        f"🆔 *Channel ID:* `{channel_id}`\n"
-        f"🔗 *Link:* {invite_link or 'No link generated'}\n\n"
-        f"Total Active Channels: `{len(channels)}/{MAX_CHANNELS}`\n"
-        f"Users must now join all active channels before accessing the bot!"
-    )
-    bot.reply_to(message, success_text, parse_mode="Markdown")
-
-# ----------------- GENERAL & DASHBOARD COMMANDS -----------------
-
-@bot.message_handler(commands=['start', 'help', 'menu', 'commands'])
-def send_menu(message):
-    user_id = message.from_user.id
-
-    if is_owner(user_id):
-        text = get_help_text()
-        bot.reply_to(message, text, parse_mode="Markdown", reply_markup=get_main_menu_keyboard(user_id))
-        return
-
-    # Check All Channel Memberships
-    is_all_joined, missing = check_channel_subscriptions(user_id)
-    if not is_all_joined:
-        bot.reply_to(
-            message,
-            f"⚠️ *[MEMBERSHIP REQUIRED]*\nYou must join all `{len(missing)}` pending channel(s) below to access this terminal.",
-            parse_mode="Markdown",
-            reply_markup=get_join_channels_keyboard(missing)
-        )
-        return
-
-    # If all joined, check Whitelist Authorization
-    if not is_allowed_user(user_id):
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("📩 Request Authorization from Admin", callback_data="send_auth_request"))
-        bot.reply_to(
-            message,
-            "✅ *[CHANNELS VERIFIED]*\nYou are a member of all required channels.\n\n"
-            "🔒 *[AUTHORIZATION REQUIRED]*\nYour account is not whitelisted by the Admin yet.\n"
-            "Click below to send an authorization request to the Admin.",
-            parse_mode="Markdown",
-            reply_markup=markup
-        )
-        return
-
-    text = get_help_text()
-    bot.reply_to(message, text, parse_mode="Markdown", reply_markup=get_main_menu_keyboard(user_id))
-
-@bot.message_handler(commands=['myid'])
-def my_id(message):
-    bot.reply_to(message, f"🪪 *YOUR TELEGRAM ID:* `{message.from_user.id}` ⚡️", parse_mode="Markdown")
-
-# ----------------- SYSTEM INFO / VITALS -----------------
-
-@bot.message_handler(commands=['status'])
-def server_status(message):
-    user_id = message.from_user.id
-    if not is_allowed_user(user_id):
-        bot.reply_to(message, "⛔️ *[UNAUTHORIZED]* Access restricted.", parse_mode="Markdown")
-        return
-    is_all_joined, missing = check_channel_subscriptions(user_id)
-    if not is_all_joined:
-        bot.reply_to(message, "⚠️ *Access Denied:* Please join all channels.", reply_markup=get_join_channels_keyboard(missing), parse_mode="Markdown")
-        return
-
-    uptime = get_uptime()
-    bot.reply_to(
-        message,
-        f"🟢 *SERVER STATUS:* `ONLINE`\n⏳ *RUNTIME:* `{uptime}`\n⚙️ *ACTIVE ENGINES:* `{len(bg_processes)}`\n⚡️ *CONNECTION:* `SECURE`",
-        parse_mode="Markdown",
-        reply_markup=get_main_menu_keyboard(user_id)
-    )
-
-@bot.message_handler(commands=['sysinfo', 'disk', 'memory'])
-def sys_info(message):
-    user_id = message.from_user.id
-    if not is_allowed_user(user_id):
-        bot.reply_to(message, "⛔️ *[UNAUTHORIZED]* Access restricted.", parse_mode="Markdown")
-        return
-    is_all_joined, missing = check_channel_subscriptions(user_id)
-    if not is_all_joined:
-        bot.reply_to(message, "⚠️ *Access Denied:* Please join all channels.", reply_markup=get_join_channels_keyboard(missing), parse_mode="Markdown")
-        return
-
-    if message.text == '/memory':
-        mem = psutil.virtual_memory()
-        bot.reply_to(message, f"🧠 *MEMORY CORE:*\n*Total:* `{mem.total / (1024**3):.2f} GB`\n*Used:* `{mem.used / (1024**3):.2f} GB` ({mem.percent}%) ⚡️", parse_mode="Markdown")
-    elif message.text == '/disk':
-        disk = psutil.disk_usage('/')
-        bot.reply_to(message, f"💽 *STORAGE VAULT:*\n*Total:* `{disk.total / (1024**3):.2f} GB`\n*Used:* `{disk.used / (1024**3):.2f} GB` ({disk.percent}%) 📂", parse_mode="Markdown")
-    else:
-        bot.reply_to(message, f"🧬 *SYSTEM VITALS:*\n*CPU Usage:* `{psutil.cpu_percent()}%` 🔥\n*RAM Usage:* `{psutil.virtual_memory().percent}%` 🧠", parse_mode="Markdown")
-
-# ----------------- BACKGROUND ENGINES (RUN, PS, STOP) -----------------
-
-@bot.message_handler(commands=['run'])
-def run_bg(message):
-    user_id = message.from_user.id
-    if not is_allowed_user(user_id):
-        bot.reply_to(message, "⛔️ *[UNAUTHORIZED]* Access restricted.", parse_mode="Markdown")
-        return
-    is_all_joined, missing = check_channel_subscriptions(user_id)
-    if not is_all_joined:
-        bot.reply_to(message, "⚠️ *Access Denied:* Please join all channels.", reply_markup=get_join_channels_keyboard(missing), parse_mode="Markdown")
-        return
-
-    global current_dir
-    cmd = message.text.replace('/run', '', 1).strip()
-    if not cmd:
-        bot.reply_to(message, "⚠️ *Format Error:*\nUse: `/run <command>` (e.g. `/run python app.py`)", parse_mode="Markdown")
-        return
-
-    try:
-        proc = subprocess.Popen(cmd, shell=True, cwd=current_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        bg_processes[proc.pid] = {'process': proc, 'cmd': cmd}
-        bot.reply_to(message, f"🟢 *[ENGINE STARTED]*\n*PID:* `{proc.pid}` ⚙️\n*CMD:* `{cmd}`\nRunning in background... 🥷", parse_mode="Markdown")
-    except Exception as e:
-        bot.reply_to(message, f"❌ *[CRASH]* Engine failed: {e}")
-
-@bot.message_handler(commands=['ps'])
-def list_ps(message):
-    user_id = message.from_user.id
-    if not is_allowed_user(user_id):
-        bot.reply_to(message, "⛔️ *[UNAUTHORIZED]* Access restricted.", parse_mode="Markdown")
-        return
-    is_all_joined, missing = check_channel_subscriptions(user_id)
-    if not is_all_joined:
-        bot.reply_to(message, "⚠️ *Access Denied:* Please join all channels.", reply_markup=get_join_channels_keyboard(missing), parse_mode="Markdown")
-        return
-
-    if not bg_processes:
-        bot.reply_to(message, "💤 *[SYSTEM IDLE]* No background engines running.")
-        return
-
-    res = "📊 *[ACTIVE ENGINES]*\n*════════════════*\n"
-    active_count = 0
-    markup = types.InlineKeyboardMarkup()
-
-    for pid, pinfo in list(bg_processes.items()):
-        if pinfo['process'].poll() is None:
-            active_count += 1
-            res += f"⚙️ *PID:* `{pid}` | *CMD:* `{pinfo['cmd']}`\n"
-            markup.add(types.InlineKeyboardButton(f"🛑 Kill PID {pid}", callback_data=f"kill_{pid}"))
-        else:
-            del bg_processes[pid]
-
-    if active_count == 0:
-        bot.reply_to(message, "💤 *[SYSTEM IDLE]* No background engines running.")
-    else:
-        bot.reply_to(message, res, parse_mode="Markdown", reply_markup=markup)
-
-@bot.message_handler(commands=['stop'])
-def stop_ps(message):
-    user_id = message.from_user.id
-    if not is_allowed_user(user_id):
-        bot.reply_to(message, "⛔️ *[UNAUTHORIZED]* Access restricted.", parse_mode="Markdown")
-        return
-    is_all_joined, missing = check_channel_subscriptions(user_id)
-    if not is_all_joined:
-        bot.reply_to(message, "⚠️ *Access Denied:* Please join all channels.", reply_markup=get_join_channels_keyboard(missing), parse_mode="Markdown")
-        return
-
-    try:
-        pid = int(message.text.split(" ")[1])
-        if pid in bg_processes:
-            bg_processes[pid]['process'].terminate()
-            del bg_processes[pid]
-            bot.reply_to(message, f"🛑 *[ENGINE KILLED]* PID `{pid}` terminated successfully! 💀", parse_mode="Markdown")
-        else:
-            bot.reply_to(message, "⚠️ *[NOT FOUND]* Target PID does not exist in active processes.")
-    except Exception:
-        bot.reply_to(message, "⚠️ *Format Error:*\nUse: `/stop <pid>`", parse_mode="Markdown")
-
-# ----------------- FILE OPERATIONS -----------------
-
-@bot.message_handler(commands=['download'])
-def download_file(message):
-    user_id = message.from_user.id
-    if not is_allowed_user(user_id):
-        bot.reply_to(message, "⛔️ *[UNAUTHORIZED]* Access restricted.", parse_mode="Markdown")
-        return
-    is_all_joined, missing = check_channel_subscriptions(user_id)
-    if not is_all_joined:
-        bot.reply_to(message, "⚠️ *Access Denied:* Please join all channels.", reply_markup=get_join_channels_keyboard(missing), parse_mode="Markdown")
-        return
-
-    global current_dir
-    filename = message.text.replace('/download', '', 1).strip()
-    if not filename:
-        bot.reply_to(message, "⚠️ *Usage:* `/download <filename>`", parse_mode="Markdown")
-        return
-
-    filepath = os.path.join(current_dir, filename)
-    if os.path.exists(filepath) and os.path.isfile(filepath):
-        bot.reply_to(message, "📥 *[EXTRACTING]* Transmitting file... ⏳", parse_mode="Markdown")
-        try:
-            with open(filepath, 'rb') as f:
-                bot.send_document(message.chat.id, f)
-        except Exception as e:
-            bot.reply_to(message, f"❌ Failed to send file: {e}")
-    else:
-        bot.reply_to(message, "❌ *[404]* File not found in current directory! 🔍")
-
-@bot.message_handler(content_types=['document'])
-def handle_upload(message):
-    user_id = message.from_user.id
-    if not is_allowed_user(user_id):
-        bot.reply_to(message, "⛔️ *[UNAUTHORIZED]* Access restricted.", parse_mode="Markdown")
-        return
-    is_all_joined, missing = check_channel_subscriptions(user_id)
-    if not is_all_joined:
-        bot.reply_to(message, "⚠️ *Access Denied:* Please join all channels.", reply_markup=get_join_channels_keyboard(missing), parse_mode="Markdown")
-        return
-
-    global current_dir
-    try:
-        file_info = bot.get_file(message.document.file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
-        filepath = os.path.join(current_dir, message.document.file_name)
-        with open(filepath, 'wb') as new_file:
-            new_file.write(downloaded_file)
-        bot.reply_to(message, f"📤 *[UPLOAD COMPLETE]*\nFile secured at:\n`{filepath}` 🔒", parse_mode="Markdown")
-    except Exception as e:
-        bot.reply_to(message, f"❌ *[UPLOAD FAILED]* Error: {e}")
-
-# ----------------- DIRECT TERMINAL COMMANDS -----------------
-
-@bot.message_handler(func=lambda message: not message.text.startswith('/'))
-def direct_terminal(message):
-    user_id = message.from_user.id
-    if not is_allowed_user(user_id):
-        bot.reply_to(message, "⛔️ *[UNAUTHORIZED]* Access restricted.", parse_mode="Markdown")
-        return
-    is_all_joined, missing = check_channel_subscriptions(user_id)
-    if not is_all_joined:
-        bot.reply_to(message, "⚠️ *Access Denied:* Please join all channels.", reply_markup=get_join_channels_keyboard(missing), parse_mode="Markdown")
-        return
-
-    global current_dir
-    cmd = message.text.strip()
-
-    if cmd.startswith("cd "):
-        new_dir = cmd[3:].strip()
-        target_path = os.path.abspath(os.path.join(current_dir, new_dir))
-        if os.path.exists(target_path) and os.path.isdir(target_path):
-            current_dir = target_path
-            bot.reply_to(message, f"📂 *[DIR CHANGED]*\nNow in:\n`{current_dir}` ⚡️", parse_mode="Markdown")
-        else:
-            bot.reply_to(message, "❌ *[404]* Directory does not exist!")
-        return
-
-    try:
-        bot.send_chat_action(message.chat.id, 'typing')
-        result = subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.STDOUT, cwd=current_dir)
-
-        if not result.strip():
-            bot.reply_to(message, "✅ *[EXECUTED]* Command succeeded with empty output. 🥷", parse_mode="Markdown")
-        else:
-            if len(result) > 4000:
-                out_path = "output.txt"
-                with open(out_path, "w", encoding="utf-8") as f:
-                    f.write(result)
-                with open(out_path, "rb") as f:
-                    bot.send_document(message.chat.id, f, caption="⚠️ *[OUTPUT TRUNCATED]* Output exceeds limits. Transmitted as file.", parse_mode="Markdown")
-            else:
-                bot.reply_to(message, f"```\n{result}\n```", parse_mode="Markdown")
-    except subprocess.CalledProcessError as e:
-        bot.reply_to(message, f"🛑 *[COMMAND ERROR]*:\n```\n{e.output}\n```", parse_mode="Markdown")
-    except Exception as e:
-        bot.reply_to(message, f"❌ *[SYSTEM ERROR]*: {e}")
-
-# ----------------- INLINE CALLBACK HANDLERS -----------------
-
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callbacks(call):
-    user_id = call.from_user.id
-
-    # 1. Verification of Channel Subscriptions
-    if call.data == "verify_membership":
-        is_all_joined, missing = check_channel_subscriptions(user_id)
-        if is_all_joined:
-            if is_allowed_user(user_id):
-                bot.answer_callback_query(call.id, "✅ Verified! Welcome back.")
-                bot.edit_message_text(
-                    chat_id=call.message.chat.id,
-                    message_id=call.message.message_id,
-                    text=get_help_text(),
-                    parse_mode="Markdown",
-                    reply_markup=get_main_menu_keyboard(user_id)
+# ═════════════════════════════════════════════════════════════════════════════
+# LOGGING SYSTEM
+# ═════════════════════════════════════════════════════════════════════════════
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(BASE_DIR / "bot_system.log", encoding="utf-8")
+    ]
+)
+logger = logging.getLogger("RIZOXHostEngine")
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SQLITE DATABASE CONTROLLER
+# ═════════════════════════════════════════════════════════════════════════════
+
+class DatabaseManager:
+    def __init__(self, db_path: Path = DB_FILE):
+        self.db_path = db_path
+        self._init_db()
+
+    def get_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_db(self) -> None:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            # Users Table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    first_name TEXT,
+                    is_approved INTEGER DEFAULT 0,
+                    is_premium INTEGER DEFAULT 0,
+                    is_banned INTEGER DEFAULT 0,
+                    credits INTEGER DEFAULT 5,
+                    daily_uploads INTEGER DEFAULT 0,
+                    last_upload_date TEXT,
+                    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            # Hosted Projects Table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS projects (
+                    project_id TEXT PRIMARY KEY,
+                    user_id INTEGER,
+                    display_name TEXT,
+                    entry_file TEXT,
+                    folder_path TEXT,
+                    log_file TEXT,
+                    is_running INTEGER DEFAULT 0,
+                    auto_restart INTEGER DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(user_id)
+                )
+            """)
+            # Analytics & Admin Settings
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            """)
+            conn.commit()
+
+    def get_user(self, user_id: int) -> Optional[sqlite3.Row]:
+        with self.get_connection() as conn:
+            return conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+
+    def add_or_update_user(self, user_id: int, username: str, first_name: str) -> None:
+        with self.get_connection() as conn:
+            user = conn.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)).fetchone()
+            if not user:
+                is_owner_flag = 1 if user_id == OWNER_ID else 0
+                conn.execute(
+                    "INSERT INTO users (user_id, username, first_name, is_approved, is_premium, credits) VALUES (?, ?, ?, ?, ?, ?)",
+                    (user_id, username, first_name, is_owner_flag, is_owner_flag, 999999 if is_owner_flag else DEFAULT_CREDITS)
                 )
             else:
-                bot.answer_callback_query(call.id, "✅ All channels verified!")
-                markup = types.InlineKeyboardMarkup()
-                markup.add(types.InlineKeyboardButton("📩 Request Authorization from Admin", callback_data="send_auth_request"))
-                channels_count = len(bot_config.get("required_channels", []))
-                text = (
-                    f"🎉 *[CHANNELS VERIFICATION SUCCESS]*\n\n"
-                    f"You have successfully joined all `{channels_count}` official channel(s)! 🚀\n\n"
-                    f"⚠️ *Next Step:* Terminal access requires Administrator approval.\n"
-                    f"Click below to send an authorization request to the Admin."
+                conn.execute(
+                    "UPDATE users SET username = ?, first_name = ? WHERE user_id = ?",
+                    (username, first_name, user_id)
                 )
-                bot.edit_message_text(
-                    chat_id=call.message.chat.id,
-                    message_id=call.message.message_id,
-                    text=text,
-                    parse_mode="Markdown",
-                    reply_markup=markup
-                )
-        else:
-            bot.answer_callback_query(call.id, f"❌ You still have {len(missing)} channel(s) left to join!", show_alert=True)
-            bot.edit_message_reply_markup(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                reply_markup=get_join_channels_keyboard(missing)
-            )
-        return
+            conn.commit()
 
-    # 2. User Sends Auth Request to Admin (FIXED: Escaped characters & fallback)
-    if call.data == "send_auth_request":
-        is_all_joined, missing = check_channel_subscriptions(user_id)
-        if not is_all_joined:
-            bot.answer_callback_query(call.id, "❌ You must join all channels first!", show_alert=True)
-            return
+    def update_credits(self, user_id: int, delta: int) -> int:
+        with self.get_connection() as conn:
+            conn.execute("UPDATE users SET credits = MAX(0, credits + ?) WHERE user_id = ?", (delta, user_id))
+            conn.commit()
+            row = conn.execute("SELECT credits FROM users WHERE user_id = ?", (user_id,)).fetchone()
+            return row["credits"] if row else 0
 
-        if is_allowed_user(user_id):
-            bot.answer_callback_query(call.id, "✅ You are already authorized!")
-            bot.edit_message_text(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                text=get_help_text(),
-                parse_mode="Markdown",
-                reply_markup=get_main_menu_keyboard(user_id)
-            )
-            return
+db = DatabaseManager()
 
-        # Sanitize names to prevent Markdown parse error (byte offset issue)
-        raw_full_name = f"{call.from_user.first_name} {call.from_user.last_name or ''}".strip()
-        safe_full_name = escape_markdown(raw_full_name)
-        
-        if call.from_user.username:
-            safe_username = "@" + escape_markdown(call.from_user.username)
-        else:
-            safe_username = "None"
+# ═════════════════════════════════════════════════════════════════════════════
+# DATA STRUCTURES & UTILITIES
+# ═════════════════════════════════════════════════════════════════════════════
 
-        admin_markup = types.InlineKeyboardMarkup(row_width=2)
-        btn_allow = types.InlineKeyboardButton("✅ Allow Access", callback_data=f"auth_allow_{user_id}")
-        btn_deny = types.InlineKeyboardButton("❌ Deny Access", callback_data=f"auth_deny_{user_id}")
-        admin_markup.add(btn_allow, btn_deny)
+def esc(text: Any) -> str:
+    """Escape HTML characters safely."""
+    return html.escape(str(text)) if text else ""
 
-        channels_count = len(bot_config.get("required_channels", []))
-        admin_text = (
-            f"🔔 *[NEW ACCESS REQUEST]*\n\n"
-            f"👤 *Name:* {safe_full_name}\n"
-            f"🔗 *Username:* {safe_username}\n"
-            f"🆔 *User ID:* `{user_id}`\n"
-            f"📢 *Channels Status:* Verified Member of all `{channels_count}` channels ✅\n\n"
-            f"Would you like to grant terminal access to this user?"
-        )
+def format_box(title: str, lines: List[str]) -> str:
+    """Generate signature RIZO style UI boxes."""
+    content = "\n".join(f"┃ {line}" if line else "┃" for line in lines)
+    return f"<b>╭━━〔 {esc(title)} 〕━━┈⊷</b>\n{content}\n<b>╰━━━━━━━━━━━━━━━┈⊷</b>"
 
+def get_system_uptime() -> str:
+    diff = int(time.time() - START_TIME)
+    days, remainder = divmod(diff, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if days > 0:
+        return f"{days}d {hours}h {minutes}m {seconds}s"
+    return f"{hours}h {minutes}m {seconds}s"
+# ═════════════════════════════════════════════════════════════════════════════
+# PROCESS & RUNTIME MANAGEMENT SYSTEM
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class ScriptProcess:
+    project_id: str
+    user_id: int
+    display_name: str
+    entry_file: str
+    folder: str
+    log_path: str
+    proc: Optional[subprocess.Popen[Any]] = None
+    started_at: float = field(default_factory=time.time)
+    restarts: int = 0
+    auto_restart: bool = AUTO_RESTART_ENABLED
+    desired_running: bool = False
+    runtime: str = "python"
+
+    @property
+    def running(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    @property
+    def pid(self) -> str:
+        return str(self.proc.pid) if self.proc and self.running else "N/A"
+
+    @property
+    def exit_code(self) -> str:
+        if self.proc is None:
+            return "Not Started"
+        if self.running:
+            return "Active (0)"
+        return str(self.proc.returncode)
+
+    def serialize(self) -> Dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+            "user_id": self.user_id,
+            "display_name": self.display_name,
+            "entry_file": self.entry_file,
+            "folder": self.folder,
+            "log_path": self.log_path,
+            "started_at": self.started_at,
+            "restarts": self.restarts,
+            "auto_restart": self.auto_restart,
+            "desired_running": self.desired_running,
+            "runtime": self.runtime,
+        }
+
+class ExecutionEngine:
+    def __init__(self) -> None:
+        self.active_processes: Dict[str, ScriptProcess] = {}
+
+    def install_requirements(self, project_folder: Path) -> Tuple[bool, str]:
+        """Automatically detect requirements.txt and install packages."""
+        req_file = project_folder / "requirements.txt"
+        if not req_file.exists():
+            return True, "No requirements.txt found. Skipping auto-install."
+
+        logger.info(f"Installing dependencies for project at {project_folder}")
         try:
-            bot.send_message(OWNER_ID, admin_text, parse_mode="Markdown", reply_markup=admin_markup)
-            pending_requests.add(user_id)
-            bot.answer_callback_query(call.id, "📨 Request sent to Admin!")
-            bot.edit_message_text(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                text="⏳ *[REQUEST TRANSMITTED]*\n\nYour authorization request has been sent to the System Admin.\nYou will receive a notification as soon as it is approved! 🚀",
-                parse_mode="Markdown"
+            cmd = [sys.executable, "-m", "pip", "install", "-r", str(req_file)]
+            result = subprocess.run(
+                cmd,
+                cwd=project_folder,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=120,
             )
+            if result.returncode == 0:
+                return True, "Dependencies installed successfully."
+            return False, f"Pip Install Failed:\n{result.stdout[-1000:]}"
+        except subprocess.TimeoutExpired:
+            return False, "Dependency installation timed out (max 120s)."
         except Exception as e:
-            # Fallback to plain text if Markdown still encounters formatting conflicts
-            try:
-                plain_text = (
-                    f"🔔 [NEW ACCESS REQUEST]\n\n"
-                    f"Name: {raw_full_name}\n"
-                    f"Username: @{call.from_user.username if call.from_user.username else 'None'}\n"
-                    f"User ID: {user_id}\n"
-                    f"Channels Status: Verified Member of all {channels_count} channels\n\n"
-                    f"Would you like to grant terminal access to this user?"
-                )
-                bot.send_message(OWNER_ID, plain_text, reply_markup=admin_markup)
-                pending_requests.add(user_id)
-                bot.answer_callback_query(call.id, "📨 Request sent to Admin!")
-                bot.edit_message_text(
-                    chat_id=call.message.chat.id,
-                    message_id=call.message.message_id,
-                    text="⏳ *[REQUEST TRANSMITTED]*\n\nYour authorization request has been sent to the System Admin.\nYou will receive a notification as soon as it is approved! 🚀",
-                    parse_mode="Markdown"
-                )
-            except Exception as e2:
-                bot.answer_callback_query(call.id, f"Error reaching Admin: {e2}", show_alert=True)
-        return
+            return False, f"Error installing dependencies: {str(e)}"
 
-    # 3. Admin Decision: ALLOW
-    if call.data.startswith("auth_allow_"):
-        if not is_owner(user_id):
-            bot.answer_callback_query(call.id, "⛔ Owner only.", show_alert=True)
-            return
-        target_uid = int(call.data.replace("auth_allow_", ""))
-        allowed_users.add(target_uid)
-        save_users(allowed_users)
-        pending_requests.discard(target_uid)
+    def locate_entry_point(self, project_folder: Path) -> Optional[Path]:
+        """Detect primary .py entry file automatically."""
+        common_names = ["main.py", "bot.py", "app.py", "index.py", "run.py"]
+        for name in common_names:
+            candidate = project_folder / name
+            if candidate.exists():
+                return candidate
 
-        bot.answer_callback_query(call.id, f"User {target_uid} approved!")
-        try:
-            bot.edit_message_text(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                text=call.message.text + f"\n\n🟢 DECISION: Allowed by Admin on {time.strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-        except Exception:
-            pass
+        # Fallback to first python file found
+        py_files = list(project_folder.rglob("*.py"))
+        if py_files:
+            return py_files[0]
+        return None
+
+    def start_script(self, item: ScriptProcess) -> Tuple[bool, str]:
+        """Spawn sub-process safely with background logging."""
+        if item.running:
+            return False, "Project is already running!"
+
+        folder_path = Path(item.folder)
+        entry_path = Path(item.entry_file)
+
+        if not entry_path.exists():
+            return False, f"Entry file missing: {entry_path.name}"
+
+        # Handle requirements installation if enabled
+        if AUTO_INSTALL_DEPENDENCIES:
+            success, msg = self.install_requirements(folder_path)
+            if not success:
+                return False, f"Dependency Error: {msg}"
 
         try:
-            user_markup = types.InlineKeyboardMarkup()
-            user_markup.add(types.InlineKeyboardButton("🚀 Launch Terminal Dashboard", callback_data="btn_main_menu"))
-            bot.send_message(
-                target_uid,
-                "🎉 *[ACCESS APPROVED]*\n\nThe System Admin has approved your request! You now have full terminal access.",
-                parse_mode="Markdown",
-                reply_markup=user_markup
+            log_handle = open(item.log_path, "a", encoding="utf-8", errors="replace", buffering=1)
+            
+            # Start subprocess detached
+            cmd = [sys.executable, "-u", str(entry_path)]
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(folder_path),
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                start_new_session=(os.name != "nt"),
             )
+
+            item.proc = proc
+            item.started_at = time.time()
+            item.desired_running = True
+            self.active_processes[item.project_id] = item
+
+            # Update DB State
+            with db.get_connection() as conn:
+                conn.execute("UPDATE projects SET is_running = 1 WHERE project_id = ?", (item.project_id,))
+                conn.commit()
+
+            return True, "Project started successfully!"
         except Exception as e:
-            print(f"[!] Notification to user {target_uid} failed: {e}")
-        return
+            logger.exception("Failed to spawn process")
+            return False, f"Process Launch Error: {str(e)}"
 
-    # 4. Admin Decision: DENY
-    if call.data.startswith("auth_deny_"):
-        if not is_owner(user_id):
-            bot.answer_callback_query(call.id, "⛔ Owner only.", show_alert=True)
-            return
-        target_uid = int(call.data.replace("auth_deny_", ""))
-        pending_requests.discard(target_uid)
-
-        bot.answer_callback_query(call.id, f"User {target_uid} denied.")
-        try:
-            bot.edit_message_text(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                text=call.message.text + f"\n\n🔴 DECISION: Denied by Admin on {time.strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-        except Exception:
-            pass
+    def stop_script(self, project_id: str) -> Tuple[bool, str]:
+        """Kill running process safely."""
+        item = self.active_processes.get(project_id)
+        if not item or not item.running or not item.proc:
+            return False, "Project is not running."
 
         try:
-            bot.send_message(target_uid, "🚫 *[ACCESS DENIED]*\nThe System Admin has rejected your authorization request.", parse_mode="Markdown")
-        except Exception:
-            pass
-        return
+            item.desired_running = False
+            if os.name == "nt":
+                item.proc.terminate()
+            else:
+                os.killpg(os.getpgid(item.proc.pid), signal.SIGTERM)
 
-    # Channel Manager Actions
-    if call.data == "btn_channel_info":
-        if not is_owner(user_id): return
-        show_channel_manager(call.message.chat.id, call.message.message_id)
-        bot.answer_callback_query(call.id)
-        return
-
-    if call.data == "add_new_channel_btn":
-        if not is_owner(user_id): return
-        current_count = len(bot_config.get("required_channels", []))
-        if current_count >= MAX_CHANNELS:
-            bot.answer_callback_query(call.id, f"Limit reached ({MAX_CHANNELS} channels maximum).", show_alert=True)
-            return
-        waiting_for_channel_forward.add(user_id)
-        text = (
-            f"📢 *[ADD CHANNEL]* ({current_count}/{MAX_CHANNELS})\n\n"
-            f"Make sure bot is admin in the channel.\n"
-            f"Now **forward any message from that channel** here.\n\n"
-            f"Send `/cancel` to cancel."
-        )
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("❌ Cancel", callback_data="cancel_channel_setup"))
-        bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=text, parse_mode="Markdown", reply_markup=markup)
-        bot.answer_callback_query(call.id)
-        return
-
-    if call.data.startswith("del_ch_"):
-        if not is_owner(user_id): return
-        target_ch_id = int(call.data.replace("del_ch_", ""))
-        channels = bot_config.get("required_channels", [])
-        bot_config["required_channels"] = [c for c in channels if c.get("id") != target_ch_id]
-        save_config(bot_config)
-        bot.answer_callback_query(call.id, "Channel removed!")
-        show_channel_manager(call.message.chat.id, call.message.message_id)
-        return
-
-    # Check authorization for other controls
-    if not is_allowed_user(user_id):
-        bot.answer_callback_query(call.id, "⛔ Access denied. Unauthorized.", show_alert=True)
-        return
-
-    is_all_joined, missing = check_channel_subscriptions(user_id)
-    if not is_all_joined:
-        bot.answer_callback_query(call.id, "⚠️ Channel membership required!", show_alert=True)
-        return
-
-    # Kill Process Callback
-    if call.data.startswith("kill_"):
-        pid = int(call.data.replace("kill_", ""))
-        if pid in bg_processes:
             try:
-                bg_processes[pid]['process'].terminate()
-                del bg_processes[pid]
-                bot.answer_callback_query(call.id, f"Engine {pid} killed!")
-                bot.send_message(call.message.chat.id, f"🛑 *[ENGINE KILLED]* PID `{pid}` successfully terminated.", parse_mode="Markdown")
-            except Exception as e:
-                bot.answer_callback_query(call.id, f"Error: {e}", show_alert=True)
-        else:
-            bot.answer_callback_query(call.id, "PID already stopped or not found.")
-        return
-
-    # Dashboard Actions
-    if call.data == "btn_main_menu":
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text=get_help_text(),
-            parse_mode="Markdown",
-            reply_markup=get_main_menu_keyboard(user_id)
-        )
-        bot.answer_callback_query(call.id)
-
-    elif call.data == "btn_status":
-        uptime = get_uptime()
-        text = (
-            f"🟢 *SERVER STATUS:* `ONLINE`\n"
-            f"⏳ *RUNTIME:* `{uptime}`\n"
-            f"⚙️ *ACTIVE ENGINES:* `{len(bg_processes)}`\n"
-            f"⚡️ *CONNECTION:* `SECURE`"
-        )
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text=text,
-            parse_mode="Markdown",
-            reply_markup=get_back_keyboard()
-        )
-        bot.answer_callback_query(call.id)
-
-    elif call.data == "btn_sysinfo":
-        cpu = psutil.cpu_percent()
-        ram = psutil.virtual_memory().percent
-        text = f"🧬 *SYSTEM VITALS:*\n*CPU Usage:* `{cpu}%` 🔥\n*RAM Usage:* `{ram}%` 🧠"
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text=text,
-            parse_mode="Markdown",
-            reply_markup=get_back_keyboard()
-        )
-        bot.answer_callback_query(call.id)
-
-    elif call.data == "btn_memory":
-        mem = psutil.virtual_memory()
-        text = (
-            f"🧠 *MEMORY CORE:*\n"
-            f"*Total:* `{mem.total / (1024**3):.2f} GB`\n"
-            f"*Used:* `{mem.used / (1024**3):.2f} GB` ({mem.percent}%) ⚡️\n"
-            f"*Available:* `{mem.available / (1024**3):.2f} GB`"
-        )
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text=text,
-            parse_mode="Markdown",
-            reply_markup=get_back_keyboard()
-        )
-        bot.answer_callback_query(call.id)
-
-    elif call.data == "btn_disk":
-        disk = psutil.disk_usage('/')
-        text = (
-            f"💽 *STORAGE VAULT:*\n"
-            f"*Total:* `{disk.total / (1024**3):.2f} GB`\n"
-            f"*Used:* `{disk.used / (1024**3):.2f} GB` ({disk.percent}%) 📂\n"
-            f"*Free:* `{disk.free / (1024**3):.2f} GB`"
-        )
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text=text,
-            parse_mode="Markdown",
-            reply_markup=get_back_keyboard()
-        )
-        bot.answer_callback_query(call.id)
-
-    elif call.data == "btn_ps":
-        if not bg_processes:
-            text = "💤 *[SYSTEM IDLE]* No background engines currently active."
-            markup = get_back_keyboard()
-        else:
-            text = "📊 *[ACTIVE ENGINES]*\n*════════════════*\n"
-            markup = types.InlineKeyboardMarkup()
-            for pid, pinfo in list(bg_processes.items()):
-                if pinfo['process'].poll() is None:
-                    text += f"⚙️ *PID:* `{pid}` | *CMD:* `{pinfo['cmd']}`\n"
-                    markup.add(types.InlineKeyboardButton(f"🛑 Kill PID {pid}", callback_data=f"kill_{pid}"))
+                item.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                if os.name == "nt":
+                    item.proc.kill()
                 else:
-                    del bg_processes[pid]
-            markup.add(types.InlineKeyboardButton("🔙 Back to Main Menu", callback_data="btn_main_menu"))
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text=text,
-            parse_mode="Markdown",
-            reply_markup=markup
-        )
-        bot.answer_callback_query(call.id)
+                    os.killpg(os.getpgid(item.proc.pid), signal.SIGKILL)
 
-    elif call.data == "btn_myid":
-        text = f"🪪 *YOUR TELEGRAM ID:* `{call.from_user.id}` ⚡️"
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text=text,
-            parse_mode="Markdown",
-            reply_markup=get_back_keyboard()
-        )
-        bot.answer_callback_query(call.id)
+            # Update DB State
+            with db.get_connection() as conn:
+                conn.execute("UPDATE projects SET is_running = 0 WHERE project_id = ?", (project_id,))
+                conn.commit()
 
-    elif call.data == "btn_help":
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text=get_help_text(),
-            parse_mode="Markdown",
-            reply_markup=get_main_menu_keyboard(user_id)
-        )
-        bot.answer_callback_query(call.id)
+            return True, "Project stopped successfully."
+        except Exception as e:
+            return False, f"Error stopping process: {str(e)}"
 
-    elif call.data == "btn_list_users":
-        if not is_owner(user_id): return
-        users_list_str = "\n".join([f"▪️ `{uid}`" for uid in allowed_users])
-        text = f"👥 *[WHITELISTED USERS]*\n\n{users_list_str}\n\n• Use `/add <id>` or `/remove <id>`."
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text=text,
-            parse_mode="Markdown",
-            reply_markup=get_back_keyboard()
-        )
-        bot.answer_callback_query(call.id)
+    def fetch_logs(self, log_path: str, lines_count: int = 100) -> str:
+        """Fetch last N lines from runtime logs."""
+        path = Path(log_path)
+        if not path.exists():
+            return "No logs generated yet."
 
-    elif call.data == "cancel_channel_setup":
-        waiting_for_channel_forward.discard(user_id)
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text="❌ Channel setup was cancelled."
-        )
-        bot.answer_callback_query(call.id)
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.readlines()
+                return "".join(content[-lines_count:])
+        except Exception as e:
+            return f"Error reading logs: {str(e)}"
 
-print("⚡️ DEV X HOST is online and waiting...")
-bot.infinity_polling()
+engine = ExecutionEngine()
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ZIP UNZIPPER & FILE VALIDATION HANDLERS
+# ═════════════════════════════════════════════════════════════════════════════
+
+def process_uploaded_archive(file_path: Path, extract_to: Path) -> Tuple[bool, str, Optional[Path]]:
+    """Extract ZIP archives and validate size & contents."""
+    if not zipfile.is_zipfile(file_path):
+        return False, "Invalid ZIP archive.", None
+
+    total_size = 0
+    try:
+        with zipfile.ZipFile(file_path, "r") as zip_ref:
+            for member in zip_ref.infolist():
+                total_size += member.file_size
+                if total_size > (MAX_ZIP_EXPANDED_MB * 1024 * 1024):
+                    return False, f"ZIP contents exceed maximum limit of {MAX_ZIP_EXPANDED_MB}MB.", None
+
+            zip_ref.extractall(extract_to)
+
+        entry_file = engine.locate_entry_point(extract_to)
+        if not entry_file:
+            return False, "No valid `.py` entry file found inside the ZIP.", None
+
+        return True, "Archive extracted successfully.", entry_file
+    except Exception as e:
+        return False, f"Extraction Error: {str(e)}", None
+# ═════════════════════════════════════════════════════════════════════════════
+# FORCE JOIN & USER PERMISSION CHECKERS
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def check_force_join(bot: Any, user_id: int) -> bool:
+    """Verify if user is joined in all mandatory channels."""
+    if not FORCE_JOIN_ENABLED or user_id == OWNER_ID:
+        return True
+
+    for channel in CHANNEL_USERNAMES:
+        try:
+            member = await bot.get_chat_member(chat_id=channel, user_id=user_id)
+            if member.status in ["left", "kicked"]:
+                return False
+        except TelegramError:
+            logger.warning(f"Could not verify status for user {user_id} in {channel}")
+            continue
+    return True
+
+def force_join_keyboard() -> InlineKeyboardMarkup:
+    """Generate dynamic join links and verification button."""
+    buttons = []
+    for idx, (link, name) in enumerate(zip(CHANNEL_LINKS, CHANNEL_NAMES)):
+        buttons.append([InlineKeyboardButton(f"📢 Join {name}", url=link)])
+    buttons.append([InlineKeyboardButton("✅ Verify Membership", callback_data="verify_join")])
+    return InlineKeyboardMarkup(buttons)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# NAVIGATION & KEYBOARD BUILDERS
+# ═════════════════════════════════════════════════════════════════════════════
+
+def main_dashboard_keyboard(user_id: int) -> ReplyKeyboardMarkup:
+    """Construct dynamic main menu based on user tier."""
+    rows = [
+        [KeyboardButton("🚀 ʜᴏsᴛ ᴘʀᴏᴊᴇᴄᴛ"), KeyboardButton("📂 ᴍʏ ᴘʀᴏᴊᴇᴄᴛs")],
+        [KeyboardButton("🧾 ʟɪᴠᴇ ʟᴏɢs"), KeyboardButton("⚙️ ᴄᴏɴᴛʀᴏʟs")],
+        [KeyboardButton("💳 ᴡᴀʟʟᴇᴛ"), KeyboardButton("📊 ᴀᴄᴄᴏᴜɴᴛ")],
+    ]
+    if user_id == OWNER_ID:
+        rows.append([KeyboardButton("👑 ᴀᴅᴍɪɴ ᴄᴇɴᴛᴇʀ")])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
+def project_action_keyboard(project_id: str, is_running: bool) -> InlineKeyboardMarkup:
+    """Inline control panel for individual projects."""
+    status_btn = (
+        InlineKeyboardButton("🛑 Stop Project", callback_data=f"p_stop:{project_id}")
+        if is_running
+        else InlineKeyboardButton("▶️ Start Project", callback_data=f"p_start:{project_id}")
+    )
+    buttons = [
+        [status_btn, InlineKeyboardButton("📜 Logs", callback_data=f"p_logs:{project_id}")],
+        [
+            InlineKeyboardButton("🔄 Restart", callback_data=f"p_restart:{project_id}"),
+            InlineKeyboardButton("🗑 Delete", callback_data=f"p_delete:{project_id}"),
+        ],
+        [InlineKeyboardButton("🔙 Back to List", callback_data="list_projects")],
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# USER COMMAND & BOT HANDLERS
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /start command and dashboard initialization."""
+    user = update.effective_user
+    if not user or not update.effective_message:
+        return
+
+    # Sync User in Database
+    db.add_or_update_user(user.id, user.username or "", user.first_name)
+    user_data = db.get_user(user.id)
+
+    if user_data and user_data["is_banned"]:
+        await update.effective_message.reply_text("🚫 Your access to this platform has been suspended.")
+        return
+
+    # Force Join Gate
+    if not await check_force_join(context.bot, user.id):
+        await update.effective_message.reply_text(
+            format_box(
+                "ACCESS RESTRICTED",
+                [
+                    "You must join all our official channels to use this bot.",
+                    "Click the buttons below to join, then press 'Verify'.",
+                ],
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=force_join_keyboard(),
+        )
+        return
+
+    tier = "👑 Owner" if user.id == OWNER_ID else ("💎 Premium" if user_data["is_premium"] else "✅ Approved User")
+    credits = user_data["credits"] if user_data else 0
+
+    text = format_box(
+        f"⚡ {BRAND_NAME} ⚡",
+        [
+            f"👤 <b>Welcome:</b> {esc(user.first_name)}",
+            f"🆔 <b>User ID:</b> <code>{user.id}</code>",
+            f"🎖 <b>Plan:</b> {tier}",
+            f"💳 <b>Credits:</b> <code>{credits}</code>",
+            f"⏱ <b>Engine Uptime:</b> <code>{get_system_uptime()}</code>",
+            "",
+            "👇 Choose an action from the menu below:",
+        ],
+    )
+    await update.effective_message.reply_text(
+        text, parse_mode=ParseMode.HTML, reply_markup=main_dashboard_keyboard(user.id)
+    )
+
+async def handle_document_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Process incoming .py and .zip project uploads."""
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not msg or not msg.document:
+        return
+
+    user_data = db.get_user(user.id)
+    if not user_data or user_data["is_banned"]:
+        await msg.reply_text("🚫 Action denied.")
+        return
+
+    if user_data["credits"] < CREDIT_PER_UPLOAD and user.id != OWNER_ID:
+        await msg.reply_text("❌ You do not have enough credits to deploy a project!")
+        return
+
+    doc = msg.document
+    filename = doc.file_name or "script.py"
+    ext = Path(filename).suffix.lower()
+
+    if ext not in [".py", ".zip"]:
+        await msg.reply_text("❌ Unsupported file format! Please upload a `.py` file or a compressed `.zip` project.")
+        return
+
+    status_msg = await msg.reply_text("📥 <i>Downloading project file...</i>", parse_mode=ParseMode.HTML)
+
+    # Unique project path creation
+    project_id = hashlib.md5(f"{user.id}_{time.time()}".encode()).hexdigest()[:10]
+    folder_path = PROJECTS_DIR / str(user.id) / project_id
+    folder_path.mkdir(parents=True, exist_ok=True)
+
+    file_path = folder_path / filename
+    telegram_file = await context.bot.get_file(doc.file_id)
+    await telegram_file.download_to_drive(file_path)
+
+    entry_file: Optional[Path] = None
+
+    if ext == ".zip":
+        await status_msg.edit_text("📦 <i>Extracting archive and resolving entry point...</i>", parse_mode=ParseMode.HTML)
+        success, err_msg, extracted_entry = process_uploaded_archive(file_path, folder_path)
+        if not success or not extracted_entry:
+            await status_msg.edit_text(f"❌ <b>Extraction Failed:</b> {err_msg}", parse_mode=ParseMode.HTML)
+            return
+        entry_file = extracted_entry
+    else:
+        entry_file = file_path
+
+    log_file = LOGS_DIR / f"{project_id}.log"
+    proc_item = ScriptProcess(
+        project_id=project_id,
+        user_id=user.id,
+        display_name=filename,
+        entry_file=str(entry_file),
+        folder=str(folder_path),
+        log_path=str(log_file),
+    )
+
+    await status_msg.edit_text("⚙️ <i>Installing requirements and spawning process...</i>", parse_mode=ParseMode.HTML)
+    success, launch_msg = engine.start_script(proc_item)
+
+    if success:
+        # Save project into DB
+        with db.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO projects (project_id, user_id, display_name, entry_file, folder_path, log_file, is_running)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+            """,
+                (project_id, user.id, filename, str(entry_file), str(folder_path), str(log_file)),
+            )
+            conn.commit()
+
+        # Deduct credits
+        if user.id != OWNER_ID:
+            db.update_credits(user.id, -CREDIT_PER_UPLOAD)
+
+        await status_msg.edit_text(
+            format_box(
+                "PROJECT DEPLOYED",
+                [
+                    f"🚀 <b>Name:</b> {esc(filename)}",
+                    f"🔑 <b>ID:</b> <code>{project_id}</code>",
+                    f"⚡ <b>Status:</b> Active",
+                    f"💳 <b>Credits Remaining:</b> <code>{db.get_user(user.id)['credits']}</code>",
+                ],
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=project_action_keyboard(project_id, True),
+        )
+    else:
+        await status_msg.edit_text(f"❌ <b>Deployment Error:</b> {launch_msg}", parse_mode=ParseMode.HTML)
+# ═════════════════════════════════════════════════════════════════════════════
+# CALLBACK QUERY ENGINE & ACTION HANDLERS
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Central router for all inline button queries."""
+    query = update.callback_query
+    if not query or not query.data:
+        return
+
+    await query.answer()
+    data = query.data
+    user = update.effective_user
+    if not user:
+        return
+
+    # Force Join Verification Callback
+    if data == "verify_join":
+        if await check_force_join(context.bot, user.id):
+            await query.edit_message_text(
+                "✅ <b>Verification Successful!</b>\n\nAap ab bot ke saare features access kar sakte hain.",
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await query.edit_message_text(
+                "❌ <b>Verification Failed!</b>\n\nAapne abhi tak saare channels join nahi kiye. Kripya pehle saare channels join karein.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=force_join_keyboard(),
+            )
+        return
+
+    # List Projects Callback
+    if data == "list_projects":
+        await list_user_projects(update, context)
+        return
+
+    # Project Action Handlers (p_start, p_stop, p_restart, p_logs, p_delete)
+    if ":" in data:
+        action, project_id = data.split(":", 1)
+        
+        with db.get_connection() as conn:
+            proj = conn.execute(
+                "SELECT * FROM projects WHERE project_id = ? AND (user_id = ? OR ? = ?)",
+                (project_id, user.id, user.id, OWNER_ID),
+            ).fetchone()
+
+        if not proj:
+            await query.edit_message_text("❌ Project nahi mila ya aapke paas access nahi hai.")
+            return
+
+        if action == "p_start":
+            proc_item = ScriptProcess(
+                project_id=proj["project_id"],
+                user_id=proj["user_id"],
+                display_name=proj["display_name"],
+                entry_file=proj["entry_file"],
+                folder=proj["folder_path"],
+                log_path=proj["log_file"],
+            )
+            success, msg = engine.start_script(proc_item)
+            res_text = "✅ Project Start Ho Gaya!" if success else f"❌ Failed: {msg}"
+            await query.edit_message_text(
+                f"{res_text}\n\nProject: <b>{esc(proj['display_name'])}</b>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=project_action_keyboard(project_id, True if success else False),
+            )
+
+        elif action == "p_stop":
+            success, msg = engine.stop_script(project_id)
+            res_text = "🛑 Project Stop Ho Gaya!" if success else f"❌ Failed: {msg}"
+            await query.edit_message_text(
+                f"{res_text}\n\nProject: <b>{esc(proj['display_name'])}</b>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=project_action_keyboard(project_id, False),
+            )
+
+        elif action == "p_restart":
+            engine.stop_script(project_id)
+            await asyncio.sleep(1)
+            proc_item = ScriptProcess(
+                project_id=proj["project_id"],
+                user_id=proj["user_id"],
+                display_name=proj["display_name"],
+                entry_file=proj["entry_file"],
+                folder=proj["folder_path"],
+                log_path=proj["log_file"],
+            )
+            success, msg = engine.start_script(proc_item)
+            res_text = "🔄 Project Restart Ho Gaya!" if success else f"❌ Restart Failed: {msg}"
+            await query.edit_message_text(
+                f"{res_text}\n\nProject: <b>{esc(proj['display_name'])}</b>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=project_action_keyboard(project_id, True if success else False),
+            )
+
+        elif action == "p_logs":
+            logs = engine.fetch_logs(proj["log_file"], lines_count=40)
+            log_output = logs[-MAX_LOG_CHARS:] if len(logs) > MAX_LOG_CHARS else logs
+            await query.edit_message_text(
+                f"📜 <b>Live Logs: {esc(proj['display_name'])}</b>\n\n<code>{esc(log_output)}</code>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=project_action_keyboard(project_id, bool(proj["is_running"])),
+            )
+
+        elif action == "p_delete":
+            engine.stop_script(project_id)
+            try:
+                shutil.rmtree(proj["folder_path"], ignore_errors=True)
+            except Exception:
+                pass
+            
+            with db.get_connection() as conn:
+                conn.execute("DELETE FROM projects WHERE project_id = ?", (project_id,))
+                conn.commit()
+
+            await query.edit_message_text(
+                f"🗑 Project <b>{esc(proj['display_name'])}</b> successfully delete kar diya gaya hai.",
+                parse_mode=ParseMode.HTML,
+            )
+
+async def list_user_projects(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Render list of active and hosted projects for current user."""
+    user = update.effective_user
+    if not user:
+        return
+
+    with db.get_connection() as conn:
+        projects = conn.execute("SELECT * FROM projects WHERE user_id = ?", (user.id,)).fetchall()
+
+    if not projects:
+        msg_text = "📂 Aapka koi project hosted nahi hai. Telegram par `.py` ya `.zip` file bhejen!"
+        if update.callback_query:
+            await update.callback_query.edit_message_text(msg_text)
+        else:
+            await update.effective_message.reply_text(msg_text)
+        return
+
+    buttons = []
+    for p in projects:
+        status_icon = "🟢" if p["is_running"] else "🔴"
+        buttons.append([
+            InlineKeyboardButton(
+                f"{status_icon} {p['display_name']} ({p['project_id']})",
+                callback_data=f"p_logs:{p['project_id']}",
+            )
+        ])
+
+    text = format_box(
+        "Aapke Hosted Projects",
+        [f"Total Projects: <code>{len(projects)}</code>", "", "Niche kisi project par click karke control karein:"]
+    )
+
+    markup = InlineKeyboardMarkup(buttons)
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+    else:
+        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+# ═════════════════════════════════════════════════════════════════════════════
+# ADMIN CENTER & MANAGEMENT COMMANDS
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def admin_panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Render comprehensive admin options."""
+    user = update.effective_user
+    if not user or user.id != OWNER_ID:
+        return
+
+    with db.get_connection() as conn:
+        total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        total_projects = conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+        active_projects = conn.execute("SELECT COUNT(*) FROM projects WHERE is_running = 1").fetchone()[0]
+
+    text = format_box(
+        "👑 ADMIN CENTER",
+        [
+            f"📊 <b>Total Users:</b> <code>{total_users}</code>",
+            f"📂 <b>Total Projects:</b> <code>{total_projects}</code>",
+            f"⚡ <b>Active Running:</b> <code>{active_projects}</code>",
+            f"⏱ <b>Uptime:</b> <code>{get_system_uptime()}</code>",
+            "",
+            "<b>Admin Commands:</b>",
+            "• <code>/addcredits USER_ID AMOUNT</code>",
+            "• <code>/makepremium USER_ID</code>",
+            "• <code>/ban USER_ID</code>",
+            "• <code>/unban USER_ID</code>",
+            "• <code>/broadcast MESSAGE</code>",
+        ]
+    )
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+
+async def add_credits_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner command to give credits to a specific user."""
+    if update.effective_user.id != OWNER_ID:
+        return
+    if len(context.args) < 2:
+        await update.effective_message.reply_text("Usage: `/addcredits USER_ID AMOUNT`", parse_mode=ParseMode.MARKDOWN)
+        return
+    try:
+        target_id = int(context.args[0])
+        amount = int(context.args[1])
+        new_total = db.update_credits(target_id, amount)
+        await update.effective_message.reply_text(f"✅ User <code>{target_id}</code> ke paas ab <code>{new_total}</code> credits hain.", parse_mode=ParseMode.HTML)
+    except ValueError:
+        await update.effective_message.reply_text("❌ Sahi parameters enter karein.")
+
+async def make_premium_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Grant Premium status to user."""
+    if update.effective_user.id != OWNER_ID:
+        return
+    if not context.args:
+        await update.effective_message.reply_text("Usage: `/makepremium USER_ID`", parse_mode=ParseMode.MARKDOWN)
+        return
+    try:
+        target_id = int(context.args[0])
+        with db.get_connection() as conn:
+            conn.execute("UPDATE users SET is_premium = 1 WHERE user_id = ?", (target_id,))
+            conn.commit()
+        db.update_credits(target_id, PREMIUM_BONUS_CREDITS)
+        await update.effective_message.reply_text(f"💎 User <code>{target_id}</code> ab Premium ban chuka hai!", parse_mode=ParseMode.HTML)
+    except ValueError:
+        await update.effective_message.reply_text("❌ Galat User ID.")
+
+async def ban_user_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ban user from using the hosting platform."""
+    if update.effective_user.id != OWNER_ID:
+        return
+    if not context.args:
+        await update.effective_message.reply_text("Usage: `/ban USER_ID`", parse_mode=ParseMode.MARKDOWN)
+        return
+    try:
+        target_id = int(context.args[0])
+        with db.get_connection() as conn:
+            conn.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (target_id,))
+            conn.commit()
+        await update.effective_message.reply_text(f"🚫 User <code>{target_id}</code> ko ban kar diya gaya hai.", parse_mode=ParseMode.HTML)
+    except ValueError:
+        await update.effective_message.reply_text("❌ Galat User ID.")
+
+# ═════════════════════════════════════════════════════════════════════════════
+# WALLET & ACCOUNT STATS
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Display user wallet details."""
+    user = update.effective_user
+    if not user:
+        return
+    
+    user_data = db.get_user(user.id)
+    credits = user_data["credits"] if user_data else 0
+
+    text = format_box(
+        "💳 USER WALLET",
+        [
+            f"👤 <b>Account:</b> {esc(user.first_name)}",
+            f"💳 <b>Current Credits:</b> <code>{credits}</code>",
+            f"⚡ <b>Cost Per Upload:</b> <code>{CREDIT_PER_UPLOAD} Credit</code>",
+            "",
+            "ℹ️ <i>Naye credits buy karne ke liye Admin se contact karein.</i>"
+        ]
+    )
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TEXT ROUTER HANDLER
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle custom keyboard responses."""
+    msg = update.effective_message
+    if not msg or not msg.text:
+        return
+
+    text = msg.text.strip()
+    user = update.effective_user
+    if not user:
+        return
+
+    if text in ["🚀 ʜᴏsᴛ ᴘʀᴏᴊᴇᴄᴛ", "⚙️ ᴄᴏɴᴛʀᴏʟs"]:
+        await msg.reply_text("📤 Apne bot ka <code>.py</code> file ya <code>.zip</code> archive is chat mein upload karein!", parse_mode=ParseMode.HTML)
+    elif text in ["📂 ᴍʏ ᴘʀᴏᴊᴇᴄᴛs", "🧾 ʟɪᴠᴇ ʟᴏɢs"]:
+        await list_user_projects(update, context)
+    elif text == "💳 ᴡᴀʟʟᴇᴛ":
+        await wallet_cmd(update, context)
+    elif text == "📊 ᴀᴄᴄᴏᴜɴᴛ":
+        await start_cmd(update, context)
+    elif text == "👑 ᴀᴅᴍɪɴ ᴄᴇɴᴛᴇʀ":
+        await admin_panel_cmd(update, context)
+# ═════════════════════════════════════════════════════════════════════════════
+# MAIN BOT INITIALIZATION ENGINE
+# ═════════════════════════════════════════════════════════════════════════════
+
+def main() -> None:
+    """Start and configure RIZO X NB TECH Hype V10.7 Application."""
+    logger.info("Initializing Bot Framework...")
+
+    # Build Telegram Bot Application
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # Core Command Handlers
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("admin", admin_panel_cmd))
+    app.add_handler(CommandHandler("addcredits", add_credits_cmd))
+    app.add_handler(CommandHandler("makepremium", make_premium_cmd))
+    app.add_handler(CommandHandler("ban", ban_user_cmd))
+    app.add_handler(CommandHandler("unban", unban_cmd))
+    app.add_handler(CommandHandler("wallet", wallet_cmd))
+
+    # Document & Dynamic Upload Handlers
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document_upload))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
+
+    # Callback Query Router
+    app.add_handler(CallbackQueryHandler(handle_callback_query))
+
+    logger.info(f"✨ {BRAND_NAME} Engine Online!")
+    
+    # Run Polling Loop
+    app.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__":
+    main()
