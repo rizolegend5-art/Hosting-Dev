@@ -29,9 +29,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from telegram import (
-    InlineKeyboardButton as TelegramInlineKeyboardButton,
+    InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton as TelegramKeyboardButton,
+    KeyboardButton,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
     Update,
@@ -52,8 +52,8 @@ from telegram.ext import (
 # GLOBAL CONSTANTS & CONFIGURATION (DIRECT EMBEDDED - NO .ENV NEEDED)
 # ═════════════════════════════════════════════════════════════════════════════
 
-BOT_TOKEN = "8931197214:AAFx97EUZ3fp5YirZKZ6EZq6ZLz2-3ajZqg"
-OWNER_ID = 7638086103
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+OWNER_ID = int(os.getenv("OWNER_ID", "7638086103"))
 
 BRAND_NAME = "RIZO X NB TECH"
 OWNER_NAME = "RIZO$ BADSHAH"
@@ -415,11 +415,14 @@ def process_uploaded_archive(file_path: Path, extract_to: Path) -> Tuple[bool, s
     total_size = 0
     try:
         with zipfile.ZipFile(file_path, "r") as zip_ref:
+            root = extract_to.resolve()
             for member in zip_ref.infolist():
                 total_size += member.file_size
                 if total_size > (MAX_ZIP_EXPANDED_MB * 1024 * 1024):
                     return False, f"ZIP contents exceed maximum limit of {MAX_ZIP_EXPANDED_MB}MB.", None
-
+                destination = (extract_to / member.filename).resolve()
+                if destination != root and root not in destination.parents:
+                    return False, "Unsafe ZIP archive: path traversal entry blocked.", None
             zip_ref.extractall(extract_to)
 
         entry_file = engine.locate_entry_point(extract_to)
@@ -817,6 +820,11 @@ async def admin_panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "• <code>/ban USER_ID</code>",
             "• <code>/unban USER_ID</code>",
             "• <code>/broadcast MESSAGE</code>",
+            "• <code>/approve USER_ID</code>",
+            "• <code>/users</code> — latest users",
+            "• <code>/stats</code> — platform statistics",
+            "• <code>/setcredits USER_ID AMOUNT</code>",
+            "• <code>/premiumoff USER_ID</code>",
         ]
     )
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -868,6 +876,170 @@ async def ban_user_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text(f"🚫 User <code>{target_id}</code> ko ban kar diya gaya hai.", parse_mode=ParseMode.HTML)
     except ValueError:
         await update.effective_message.reply_text("❌ Galat User ID.")
+
+async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Remove a user's ban (owner only)."""
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or user.id != OWNER_ID or not msg:
+        return
+    if not context.args:
+        await msg.reply_text("Usage: /unban USER_ID")
+        return
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await msg.reply_text("❌ Galat User ID.")
+        return
+    with db.get_connection() as conn:
+        cur = conn.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (target_id,))
+        conn.commit()
+    if cur.rowcount:
+        await msg.reply_text(f"✅ User {target_id} ka ban remove kar diya gaya hai.")
+    else:
+        await msg.reply_text("❌ User database mein nahi mila.")
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show user-facing commands and hosting instructions."""
+    msg = update.effective_message
+    if not msg:
+        return
+    await msg.reply_text(
+        format_box("RIZO HOSTING — HELP", [
+            "🚀 Upload a .py file or .zip to deploy a project.",
+            "📂 /myprojects — view your projects",
+            "📜 /status — bot and platform status",
+            "💳 /wallet — view credits",
+            "❓ /help — show this menu",
+            "", "⚠️ Only upload code you trust. Uploaded scripts run on the hosting service."
+        ]), parse_mode=ParseMode.HTML, reply_markup=main_dashboard_keyboard(update.effective_user.id)
+    )
+
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show platform and current user's project status."""
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not msg:
+        return
+    with db.get_connection() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+        running = conn.execute("SELECT COUNT(*) FROM projects WHERE is_running = 1").fetchone()[0]
+        own = conn.execute("SELECT COUNT(*) FROM projects WHERE user_id = ?", (user.id,)).fetchone()[0]
+    await msg.reply_text(format_box("LIVE PLATFORM STATUS", [
+        f"🟢 <b>Bot:</b> Online", f"⏱ <b>Uptime:</b> <code>{get_system_uptime()}</code>",
+        f"📂 <b>All Projects:</b> <code>{total}</code>", f"⚡ <b>DB Running Flag:</b> <code>{running}</code>",
+        f"👤 <b>Your Projects:</b> <code>{own}</code>", f"🧠 <b>Python:</b> <code>{esc(platform.python_version())}</code>"
+    ]), parse_mode=ParseMode.HTML)
+
+async def approve_user_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user, msg = update.effective_user, update.effective_message
+    if not user or user.id != OWNER_ID or not msg:
+        return
+    if not context.args:
+        await msg.reply_text("Usage: /approve USER_ID")
+        return
+    try:
+        target = int(context.args[0])
+    except ValueError:
+        await msg.reply_text("❌ User ID number hona chahiye.")
+        return
+    with db.get_connection() as conn:
+        cur = conn.execute("UPDATE users SET is_approved = 1 WHERE user_id = ?", (target,))
+        conn.commit()
+    await msg.reply_text("✅ User approved." if cur.rowcount else "❌ User pehle /start kare taake database mein add ho.")
+
+async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user, msg = update.effective_user, update.effective_message
+    if not user or user.id != OWNER_ID or not msg:
+        return
+    with db.get_connection() as conn:
+        rows = conn.execute("SELECT user_id, username, first_name, is_premium, is_banned, credits FROM users ORDER BY joined_at DESC LIMIT 25").fetchall()
+        total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    lines = [f"Total users: <code>{total}</code>", "Latest 25 users:"]
+    for row in rows:
+        display = ("@" + row["username"]) if row["username"] else (row["first_name"] or "User")
+        flags = " 🚫BANNED" if row["is_banned"] else (" 💎PREMIUM" if row["is_premium"] else "")
+        lines.append(f"• {esc(display)} — <code>{row['user_id']}</code> — credits <code>{row['credits']}</code>{flags}")
+    await msg.reply_text(format_box("USER MANAGER", lines), parse_mode=ParseMode.HTML)
+
+async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user, msg = update.effective_user, update.effective_message
+    if not user or user.id != OWNER_ID or not msg:
+        return
+    with db.get_connection() as conn:
+        vals = {
+            "users": conn.execute("SELECT COUNT(*) FROM users").fetchone()[0],
+            "approved": conn.execute("SELECT COUNT(*) FROM users WHERE is_approved = 1").fetchone()[0],
+            "premium": conn.execute("SELECT COUNT(*) FROM users WHERE is_premium = 1").fetchone()[0],
+            "banned": conn.execute("SELECT COUNT(*) FROM users WHERE is_banned = 1").fetchone()[0],
+            "projects": conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0],
+            "running": conn.execute("SELECT COUNT(*) FROM projects WHERE is_running = 1").fetchone()[0],
+        }
+    await msg.reply_text(format_box("PLATFORM ANALYTICS", [
+        f"👥 Users: <code>{vals['users']}</code>", f"✅ Approved: <code>{vals['approved']}</code>",
+        f"💎 Premium: <code>{vals['premium']}</code>", f"🚫 Banned: <code>{vals['banned']}</code>",
+        f"📦 Projects: <code>{vals['projects']}</code>", f"⚡ Running (DB flag): <code>{vals['running']}</code>",
+        f"⏱ Uptime: <code>{get_system_uptime()}</code>"
+    ]), parse_mode=ParseMode.HTML)
+
+async def set_credits_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user, msg = update.effective_user, update.effective_message
+    if not user or user.id != OWNER_ID or not msg:
+        return
+    if len(context.args) < 2:
+        await msg.reply_text("Usage: /setcredits USER_ID AMOUNT")
+        return
+    try:
+        target, amount = int(context.args[0]), int(context.args[1])
+        if amount < 0:
+            raise ValueError
+    except ValueError:
+        await msg.reply_text("❌ User ID aur credits non-negative numbers hon.")
+        return
+    with db.get_connection() as conn:
+        cur = conn.execute("UPDATE users SET credits = ? WHERE user_id = ?", (amount, target))
+        conn.commit()
+    await msg.reply_text(f"✅ Credits set to {amount}." if cur.rowcount else "❌ User database mein nahi mila.")
+
+async def premium_off_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user, msg = update.effective_user, update.effective_message
+    if not user or user.id != OWNER_ID or not msg:
+        return
+    if not context.args:
+        await msg.reply_text("Usage: /premiumoff USER_ID")
+        return
+    try:
+        target = int(context.args[0])
+    except ValueError:
+        await msg.reply_text("❌ Galat User ID.")
+        return
+    with db.get_connection() as conn:
+        cur = conn.execute("UPDATE users SET is_premium = 0 WHERE user_id = ?", (target,))
+        conn.commit()
+    await msg.reply_text("✅ Premium removed." if cur.rowcount else "❌ User database mein nahi mila.")
+
+async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only broadcast with basic rate limiting and delivery summary."""
+    user, msg = update.effective_user, update.effective_message
+    if not user or user.id != OWNER_ID or not msg:
+        return
+    body = msg.text.partition(" ")[2].strip() if msg.text else ""
+    if not body:
+        await msg.reply_text("Usage: /broadcast Your message")
+        return
+    with db.get_connection() as conn:
+        recipients = [r[0] for r in conn.execute("SELECT user_id FROM users WHERE is_banned = 0").fetchall()]
+    status = await msg.reply_text(f"📣 Broadcast started for {len(recipients)} users…")
+    sent = failed = 0
+    for recipient in recipients:
+        try:
+            await context.bot.send_message(chat_id=recipient, text=body)
+            sent += 1
+        except (Forbidden, BadRequest, TelegramError):
+            failed += 1
+        await asyncio.sleep(0.05)
+    await status.edit_text(f"📣 Broadcast finished.\n✅ Sent: {sent}\n⚠️ Failed: {failed}")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # WALLET & ACCOUNT STATS
@@ -926,6 +1098,8 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
 def main() -> None:
     """Start and configure RIZO X NB TECH Hype V10.7 Application."""
     logger.info("Initializing Bot Framework...")
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN missing. Set BOT_TOKEN in Railway Variables.")
 
     # Build Telegram Bot Application
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -938,6 +1112,15 @@ def main() -> None:
     app.add_handler(CommandHandler("ban", ban_user_cmd))
     app.add_handler(CommandHandler("unban", unban_cmd))
     app.add_handler(CommandHandler("wallet", wallet_cmd))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("myprojects", list_user_projects))
+    app.add_handler(CommandHandler("approve", approve_user_cmd))
+    app.add_handler(CommandHandler("users", users_cmd))
+    app.add_handler(CommandHandler("stats", stats_cmd))
+    app.add_handler(CommandHandler("setcredits", set_credits_cmd))
+    app.add_handler(CommandHandler("premiumoff", premium_off_cmd))
+    app.add_handler(CommandHandler("broadcast", broadcast_cmd))
 
     # Document & Dynamic Upload Handlers
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document_upload))
