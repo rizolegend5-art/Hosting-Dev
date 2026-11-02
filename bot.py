@@ -330,7 +330,7 @@ def build_welcome_text(user_id: int, full_name: str) -> str:
 📢 <b>Updates:</b> {UPDATE_CHANNEL}
 🎥 <b>YouTube:</b> {YOUTUBE_CHANNEL}
 
-⚡ <b>Developed by</b> Aditya (Genius Hacker)
+⚡ <b>Developed by</b> RIZO (BLACK Hacker)
 🔒 <b>Version:</b> 2.0"""
 
 @dp.message(Command("start"))
