@@ -2399,8 +2399,8 @@ input,textarea{background:#0b0f17;color:#e6edf3;border:1px solid #30363d;border-
 <button class="nav on" data-p="over">📊 Overview</button><button class="nav" data-p="bots">🤖 Running Bots</button>
 <button class="nav" data-p="files">📁 All Files</button><button class="nav" data-p="users">👥 Users</button>
 <button class="nav" data-p="cast">📢 Broadcast</button><button class="nav" data-p="set">⚙️ Settings</button>
-<a class="nav" href="/" style="text-decoration:none">🌐 Website</a><div class="side-foot">Developed by Aditya</div></div>
-<div id="main"><div id="top"><button class="a b" onclick="$('side').classList.toggle('open')">☰ Menu</button><b>Genius HostBot</b></div>
+<a class="nav" href="/" style="text-decoration:none">🌐 Website</a><div class="side-foot">Developed by RIZO</div></div>
+<div id="main"><div id="top"><button class="a b" onclick="$('side').classList.toggle('open')">☰ Menu</button><b>RIZO HostBot</b></div>
 <h2 id="ttl"></h2><div class="sub" id="st"></div><div id="view"></div></div><div id="toast"></div>
 <script>
 const $=id=>document.getElementById(id);let D=null,P='over',Q='';
