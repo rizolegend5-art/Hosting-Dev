@@ -31,6 +31,9 @@ ADMIN_ID_STR = os.getenv('ADMIN_ID')
 YOUR_USERNAME = os.getenv('YOUR_USERNAME')
 UPDATE_CHANNEL = os.getenv('UPDATE_CHANNEL')
 
+# 📢 Channel jahan running files aur details jayengi
+RUN_LOG_CHANNEL = '@botfilesrizo'
+
 if not TOKEN:
     logger.error("BOT_TOKEN not found in environment variables!")
     raise ValueError("BOT_TOKEN is required. Please set it in .env file or environment variables.")
@@ -190,7 +193,6 @@ migrate_db()
 load_data()
 
 # ── AUTO DEPENDENCY INSTALLER ────────────────────────
-# Import name → actual pip package name (jab dono alag hote hain)
 IMPORT_TO_PIP = {
     'telebot': 'pyTelegramBotAPI',
     'telegram': 'python-telegram-bot',
@@ -213,7 +215,6 @@ IMPORT_TO_PIP = {
     'serial': 'pyserial',
 }
 
-# Python built-in modules — inhe kabhi install karne ki koshish nahi karni
 STDLIB_MODULES = set(sys.stdlib_module_names) if hasattr(sys, 'stdlib_module_names') else {
     'os', 'sys', 'time', 'json', 're', 'math', 'random', 'datetime', 'collections',
     'itertools', 'functools', 'subprocess', 'threading', 'asyncio', 'socket', 'io',
@@ -223,7 +224,6 @@ STDLIB_MODULES = set(sys.stdlib_module_names) if hasattr(sys, 'stdlib_module_nam
 }
 
 def extract_imports(file_path):
-    """File ke andar se saare top-level 'import X' / 'from X import Y' nikalta hai"""
     modules = set()
     try:
         content = Path(file_path).read_text(errors='ignore')
@@ -235,8 +235,6 @@ def extract_imports(file_path):
     return modules
 
 def install_missing_dependencies(file_path, timeout=90):
-    """Script mein use ho rahi libraries check karke jo missing hain unhe pip se install karta hai.
-    Returns: (installed_list, failed_list)"""
     modules = extract_imports(file_path)
     installed, failed = [], []
 
@@ -244,7 +242,7 @@ def install_missing_dependencies(file_path, timeout=90):
         if mod in STDLIB_MODULES or mod in ('__future__',):
             continue
         if importlib.util.find_spec(mod) is not None:
-            continue  # already installed
+            continue
 
         pip_name = IMPORT_TO_PIP.get(mod, mod)
         try:
@@ -263,41 +261,44 @@ def install_missing_dependencies(file_path, timeout=90):
     return installed, failed
 
 def get_user_file_limit(user_id):
-    return OWNER_LIMIT  # Sabke liye unlimited — koi upload limit nahi
+    return OWNER_LIMIT
 
 def format_limit(limit):
     return "Unlimited ♾️" if limit == float('inf') else f"{limit} files"
 
+# 🌈 7-COLOR ANIMATED DYNAMIC BUTTONS THEME
 def get_main_keyboard(user_id):
     if user_id in admin_ids:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📢 Updates", url=UPDATE_CHANNEL)],
-            [InlineKeyboardButton(text="📤 Upload File", callback_data="upload_file"),
-             InlineKeyboardButton(text="📁 My Files", callback_data="check_files")],
-            [InlineKeyboardButton(text="🔍 Search Files", callback_data="search_files"),
-             InlineKeyboardButton(text="⚡ Bot Speed", callback_data="bot_speed")],
-            [InlineKeyboardButton(text="📊 My Stats", callback_data="statistics"),
-             InlineKeyboardButton(text="👑 Admin Panel", callback_data="admin_panel")],
-            [InlineKeyboardButton(text="💬 Contact", url=f"https://t.me/{YOUR_USERNAME.replace('@', '')}")]
+            [InlineKeyboardButton(text="🔴 📢 Updates Channel", url=UPDATE_CHANNEL)],
+            [InlineKeyboardButton(text="🟠 📤 Upload File", callback_data="upload_file"),
+             InlineKeyboardButton(text="🟡 📁 My Files", callback_data="check_files")],
+            [InlineKeyboardButton(text="🟢 ⭐ Favorites", callback_data="my_favorites"),
+             InlineKeyboardButton(text="🔵 🔍 Search Files", callback_data="search_files")],
+            [InlineKeyboardButton(text="🟣 ⚡ Bot Speed", callback_data="bot_speed"),
+             InlineKeyboardButton(text="🟤 📊 My Stats", callback_data="statistics")],
+            [InlineKeyboardButton(text="🔴 👑 Admin Panel", callback_data="admin_panel")],
+            [InlineKeyboardButton(text="✨ 💬 Contact Support", url=f"https://t.me/{YOUR_USERNAME.replace('@', '')}")]
         ])
     else:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📢 Updates Channel", url=UPDATE_CHANNEL)],
-            [InlineKeyboardButton(text="📤 Upload File", callback_data="upload_file"),
-             InlineKeyboardButton(text="📁 My Files", callback_data="check_files")],
-            [InlineKeyboardButton(text="🔍 Search Files", callback_data="search_files"),
-             InlineKeyboardButton(text="⚡ Bot Speed", callback_data="bot_speed")],
-            [InlineKeyboardButton(text="📊 My Stats", callback_data="statistics")],
-            [InlineKeyboardButton(text="💬 Contact Owner", url=f"https://t.me/{YOUR_USERNAME.replace('@', '')}")]
+            [InlineKeyboardButton(text="🔴 📢 Updates Channel", url=UPDATE_CHANNEL)],
+            [InlineKeyboardButton(text="🟠 📤 Upload File", callback_data="upload_file"),
+             InlineKeyboardButton(text="🟡 📁 My Files", callback_data="check_files")],
+            [InlineKeyboardButton(text="🟢 ⭐ Favorites", callback_data="my_favorites"),
+             InlineKeyboardButton(text="🔵 🔍 Search Files", callback_data="search_files")],
+            [InlineKeyboardButton(text="🟣 ⚡ Bot Speed", callback_data="bot_speed"),
+             InlineKeyboardButton(text="🟤 📊 My Stats", callback_data="statistics")],
+            [InlineKeyboardButton(text="✨ 💬 Contact Owner", url=f"https://t.me/{YOUR_USERNAME.replace('@', '')}")]
         ])
     return keyboard
 
 def get_admin_panel_keyboard():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⏱️ Bot Uptime", callback_data="admin_bot_uptime")],
-        [InlineKeyboardButton(text="👥 Total Users", callback_data="admin_total_users_simple")],
-        [InlineKeyboardButton(text="📝 Logs", callback_data="admin_view_logs")],
-        [InlineKeyboardButton(text="🏠 Main Menu", callback_data="back_to_main")]
+        [InlineKeyboardButton(text="🔴 ⏱️ Bot Uptime", callback_data="admin_bot_uptime")],
+        [InlineKeyboardButton(text="🟡 👥 Total Users", callback_data="admin_total_users_simple")],
+        [InlineKeyboardButton(text="🟢 📝 System Logs", callback_data="admin_view_logs")],
+        [InlineKeyboardButton(text="🔵 🏠 Main Menu", callback_data="back_to_main")]
     ])
     return keyboard
 
@@ -317,13 +318,13 @@ def build_welcome_text(user_id: int, full_name: str) -> str:
 
 📤 <b>Upload Files</b> — Python, JS, ZIP
 📁 <b>Manage Files</b> — View, delete, organize
+⭐ <b>Favorites</b> — Quick script access
 🔍 <b>Search Files</b> — Find by name/type
 ▶️ <b>Run Scripts</b> — Execute Python/Node.js
+📋 <b>View Output</b> — Check live script logs
 🛑 <b>Stop Scripts</b> — Force stop running
 📊 <b>View Stats</b> — Usage & storage
 ⚡ <b>Speed Test</b> — Bot response time
-💾 <b>File Info</b> — Size, type, date
-ℹ️ <b>Help &amp; Support</b> — Get assistance
 
 ━━━━━━━━━━━━━━━━━━━━
 📢 <b>Updates:</b> {UPDATE_CHANNEL}
@@ -410,7 +411,7 @@ async def callback_upload_file(callback: types.CallbackQuery):
 """
     
     back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🏠 Main Menu", callback_data="back_to_main")]
+        [InlineKeyboardButton(text="🔵 🏠 Main Menu", callback_data="back_to_main")]
     ])
     
     await callback.message.edit_text(upload_text, reply_markup=back_keyboard, parse_mode="HTML")
@@ -432,8 +433,8 @@ async def callback_check_files(callback: types.CallbackQuery):
 Upload your first file to get started! 🚀
 """
         back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📤 Upload File", callback_data="upload_file")],
-            [InlineKeyboardButton(text="🏠 Main Menu", callback_data="back_to_main")]
+            [InlineKeyboardButton(text="🟠 📤 Upload File", callback_data="upload_file")],
+            [InlineKeyboardButton(text="🔵 🏠 Main Menu", callback_data="back_to_main")]
         ])
     else:
         text = f"""
@@ -451,15 +452,16 @@ Upload your first file to get started! 🚀
             star = "⭐" if is_favorite else "☆"
             
             buttons.append([
-                InlineKeyboardButton(text=f"▶️ Run {file_name[:15]}", callback_data=f"run_script:{file_name}"),
-                InlineKeyboardButton(text=f"{star}", callback_data=f"toggle_fav:{file_name}")
+                InlineKeyboardButton(text=f"🟢 ▶️ Run {file_name[:10]}", callback_data=f"run_script:{file_name}"),
+                InlineKeyboardButton(text=f"🟡 📋 Logs", callback_data=f"view_log:{file_name}"),
+                InlineKeyboardButton(text=f"🔴 {star}", callback_data=f"toggle_fav:{file_name}")
             ])
             buttons.append([
-                InlineKeyboardButton(text=f"ℹ️ Info {file_name[:15]}", callback_data=f"file_info:{file_name}"),
-                InlineKeyboardButton(text=f"🗑️ Delete", callback_data=f"delete_file:{file_name}")
+                InlineKeyboardButton(text=f"🔵 ℹ️ Info", callback_data=f"file_info:{file_name}"),
+                InlineKeyboardButton(text=f"🟣 🗑️ Delete", callback_data=f"delete_file:{file_name}")
             ])
         
-        buttons.append([InlineKeyboardButton(text="🏠 Main Menu", callback_data="back_to_main")])
+        buttons.append([InlineKeyboardButton(text="🔵 🏠 Main Menu", callback_data="back_to_main")])
         back_keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     
     await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
@@ -480,7 +482,7 @@ async def callback_my_favorites(callback: types.CallbackQuery):
 
 Add files to favorites for quick access! 🚀
 """
-        buttons = [[InlineKeyboardButton(text="🏠 Main Menu", callback_data="back_to_main")]]
+        buttons = [[InlineKeyboardButton(text="🔵 🏠 Main Menu", callback_data="back_to_main")]]
     else:
         text = f"""
 ╔═══════════════════════╗
@@ -492,11 +494,12 @@ Add files to favorites for quick access! 🚀
         for i, file_name in enumerate(favorites, 1):
             text += f"{i}. ⭐ <code>{file_name}</code>\n"
             buttons.append([
-                InlineKeyboardButton(text=f"▶️ {file_name[:20]}", callback_data=f"run_script:{file_name}"),
-                InlineKeyboardButton(text=f"❌", callback_data=f"toggle_fav:{file_name}")
+                InlineKeyboardButton(text=f"🟢 ▶️ {file_name[:12]}", callback_data=f"run_script:{file_name}"),
+                InlineKeyboardButton(text=f"🟡 📋 Logs", callback_data=f"view_log:{file_name}"),
+                InlineKeyboardButton(text=f"🔴 ❌", callback_data=f"toggle_fav:{file_name}")
             ])
         
-        buttons.append([InlineKeyboardButton(text="🏠 Main Menu", callback_data="back_to_main")])
+        buttons.append([InlineKeyboardButton(text="🔵 🏠 Main Menu", callback_data="back_to_main")])
     
     back_keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
@@ -525,8 +528,8 @@ To search, use:
 """
     
     back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📁 View All Files", callback_data="check_files")],
-        [InlineKeyboardButton(text="🏠 Main Menu", callback_data="back_to_main")]
+        [InlineKeyboardButton(text="🟡 📁 View All Files", callback_data="check_files")],
+        [InlineKeyboardButton(text="🔵 🏠 Main Menu", callback_data="back_to_main")]
     ])
     
     await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
@@ -566,8 +569,8 @@ async def callback_bot_speed(callback: types.CallbackQuery):
 """
     
     back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Test Again", callback_data="bot_speed"),
-         InlineKeyboardButton(text="🏠 Home", callback_data="back_to_main")]
+        [InlineKeyboardButton(text="🟢 🔄 Test Again", callback_data="bot_speed"),
+         InlineKeyboardButton(text="🔵 🏠 Home", callback_data="back_to_main")]
     ])
     
     await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
@@ -578,8 +581,6 @@ async def callback_statistics(callback: types.CallbackQuery):
     
     user_file_count = len(user_files.get(user_id, []))
     user_fav_count = len(user_favorites.get(user_id, []))
-    limit = get_user_file_limit(user_id)
-    is_premium = user_id in user_subscriptions
     
     text = f"""
 ╔═══════════════════════╗
@@ -613,115 +614,9 @@ async def callback_statistics(callback: types.CallbackQuery):
         text += f"📁 Total Files: {sum(len(files) for files in user_files.values())}\n"
     
     back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🏠 Main Menu", callback_data="back_to_main")]
+        [InlineKeyboardButton(text="🔵 🏠 Main Menu", callback_data="back_to_main")]
     ])
     
-    await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
-    await callback.answer()
-
-@dp.callback_query(F.data == "help_info")
-async def callback_help_info(callback: types.CallbackQuery):
-    text = """
-╔═══════════════════════╗
-    ℹ️ <b>HELP & INFO</b> ℹ️
-╚═══════════════════════╝
-
-<b>🎯 HOW TO USE:</b>
-
-1️⃣ <b>Upload Files:</b>
-   • Click 'Upload File'
-   • Send your .py, .js, or .zip file
-   • File will be saved automatically
-
-2️⃣ <b>Run Scripts:</b>
-   • Go to 'My Files'
-   • Click 'Run' on any file
-   • Monitor script execution
-
-3️⃣ <b>Manage Files:</b>
-   • View all files in 'My Files'
-   • Add to favorites with ⭐
-   • Delete unwanted files
-
-4️⃣ <b>Search:</b>
-   • Use /search [filename]
-   • Quick file lookup
-
-━━━━━━━━━━━━━━━━━━━━
-<b>💡 COMMANDS:</b>
-
-/start - Start the bot
-/help - Show this help
-/search - Search files
-/stats - Your statistics
-/premium - Free info
-
-<b>Need help? Contact owner! 💬</b>
-"""
-    
-    back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎯 Features", callback_data="all_features")],
-        [InlineKeyboardButton(text="🏠 Main Menu", callback_data="back_to_main")]
-    ])
-    
-    await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
-    await callback.answer()
-
-@dp.callback_query(F.data == "all_features")
-async def callback_all_features(callback: types.CallbackQuery):
-    text = """
-╔═══════════════════════╗
-    🎯 <b>ALL FEATURES</b> 🎯
-╚═══════════════════════╝
-
-<b>✨ FREE USER FEATURES (12+):</b>
-
-1. 📤 Upload Files (Python, JS, ZIP)
-2. 📁 View & Manage Files
-3. ⭐ Add to Favorites
-4. 🔍 Search Files by Name
-5. ▶️ Run Python Scripts
-6. ▶️ Run JavaScript Scripts
-7. 🛑 Stop Running Scripts
-8. 📊 View Your Statistics
-9. ⚡ Bot Speed Test
-10. 📥 Download Your Files
-11. 💾 View File Information
-12. ℹ️ Help & Support
-13. 🎯 Feature Discovery
-
-━━━━━━━━━━━━━━━━━━━━
-<b>🆓 SAB KUCH FREE HAI!</b>
-
-• Unlimited file uploads
-• Koi premium plan nahi
-• Sabke liye same features
-"""
-    
-    back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🏠 Main Menu", callback_data="back_to_main")]
-    ])
-    
-    await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
-    await callback.answer()
-
-@dp.callback_query(F.data == "get_premium")
-async def callback_get_premium(callback: types.CallbackQuery):
-    text = """
-╔═══════════════════════╗
-    🆓 <b>100% FREE</b> 🆓
-╚═══════════════════════╝
-
-Is bot mein <b>koi premium plan nahi</b> hai.
-✅ Unlimited uploads
-✅ Saare features sabke liye free
-
-Help chahiye? Owner se contact karo 💬
-"""
-    back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 Contact Owner", url=f"https://t.me/{YOUR_USERNAME.replace('@', '')}")],
-        [InlineKeyboardButton(text="🏠 Main Menu", callback_data="back_to_main")]
-    ])
     await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
     await callback.answer()
 
@@ -765,7 +660,7 @@ async def callback_admin_bot_uptime(callback: types.CallbackQuery):
 ⏳ <b>Uptime:</b> {days}d {hours}h {minutes}m {seconds}s"""
 
     back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Back", callback_data="admin_panel")]
+        [InlineKeyboardButton(text="🔵 🔙 Back", callback_data="admin_panel")]
     ])
     await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
     await callback.answer()
@@ -788,7 +683,7 @@ async def callback_admin_total_users_simple(callback: types.CallbackQuery):
 ▶️ <b>Currently Running Scripts:</b> {total_active_scripts}"""
 
     back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Back", callback_data="admin_panel")]
+        [InlineKeyboardButton(text="🔵 🔙 Back", callback_data="admin_panel")]
     ])
     await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
     await callback.answer()
@@ -858,10 +753,10 @@ async def callback_file_info(callback: types.CallbackQuery):
 """
     
     back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="▶️ Run", callback_data=f"run_script:{file_name}"),
-         InlineKeyboardButton(text="🗑️ Delete", callback_data=f"delete_file:{file_name}")],
-        [InlineKeyboardButton(text="📁 My Files", callback_data="check_files"),
-         InlineKeyboardButton(text="🏠 Home", callback_data="back_to_main")]
+        [InlineKeyboardButton(text="🟢 ▶️ Run", callback_data=f"run_script:{file_name}"),
+         InlineKeyboardButton(text="🟣 🗑️ Delete", callback_data=f"delete_file:{file_name}")],
+        [InlineKeyboardButton(text="🟡 📁 My Files", callback_data="check_files"),
+         InlineKeyboardButton(text="🔵 🏠 Home", callback_data="back_to_main")]
     ])
     
     await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
@@ -957,21 +852,21 @@ async def handle_document(message: types.Message):
         
         if file_ext == '.zip':
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📦 Extract ZIP", callback_data=f"extract_zip:{file_name}"),
-                 InlineKeyboardButton(text="⭐ Add Favorite", callback_data=f"toggle_fav:{file_name}")],
-                [InlineKeyboardButton(text="ℹ️ File Info", callback_data=f"file_info:{file_name}"),
-                 InlineKeyboardButton(text="🗑️ Delete", callback_data=f"delete_file:{file_name}")],
-                [InlineKeyboardButton(text="📁 My Files", callback_data="check_files"),
-                 InlineKeyboardButton(text="🏠 Main Menu", callback_data="back_to_main")]
+                [InlineKeyboardButton(text="🟢 📦 Extract ZIP", callback_data=f"extract_zip:{file_name}"),
+                 InlineKeyboardButton(text="🔴 ⭐ Add Favorite", callback_data=f"toggle_fav:{file_name}")],
+                [InlineKeyboardButton(text="🔵 ℹ️ File Info", callback_data=f"file_info:{file_name}"),
+                 InlineKeyboardButton(text="🟣 🗑️ Delete", callback_data=f"delete_file:{file_name}")],
+                [InlineKeyboardButton(text="🟡 📁 My Files", callback_data="check_files"),
+                 InlineKeyboardButton(text="🔵 🏠 Main Menu", callback_data="back_to_main")]
             ])
         else:
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="▶️ Run Now", callback_data=f"run_script:{file_name}"),
-                 InlineKeyboardButton(text="⭐ Add Favorite", callback_data=f"toggle_fav:{file_name}")],
-                [InlineKeyboardButton(text="ℹ️ File Info", callback_data=f"file_info:{file_name}"),
-                 InlineKeyboardButton(text="🗑️ Delete", callback_data=f"delete_file:{file_name}")],
-                [InlineKeyboardButton(text="📁 My Files", callback_data="check_files"),
-                 InlineKeyboardButton(text="🏠 Main Menu", callback_data="back_to_main")]
+                [InlineKeyboardButton(text="🟢 ▶️ Run Now", callback_data=f"run_script:{file_name}"),
+                 InlineKeyboardButton(text="🔴 ⭐ Add Favorite", callback_data=f"toggle_fav:{file_name}")],
+                [InlineKeyboardButton(text="🔵 ℹ️ File Info", callback_data=f"file_info:{file_name}"),
+                 InlineKeyboardButton(text="🟣 🗑️ Delete", callback_data=f"delete_file:{file_name}")],
+                [InlineKeyboardButton(text="🟡 📁 My Files", callback_data="check_files"),
+                 InlineKeyboardButton(text="🔵 🏠 Main Menu", callback_data="back_to_main")]
             ])
         
         await status_msg.edit_text(
@@ -1066,16 +961,38 @@ async def callback_run_script(callback: types.CallbackQuery):
         conn.close()
         bot_stats['total_runs'] = bot_stats.get('total_runs', 0) + 1
         
+        # 📢 SEND DETAILS + FILE TO CHANNEL (@botfilesrizo)
+        try:
+            user_full_name = callback.from_user.full_name
+            channel_caption = f"""
+🚀 <b>NEW SCRIPT RUNNED & HOSTED!</b>
+
+📄 <b>File Name:</b> <code>{file_name}</code>
+👤 <b>Run By:</b> {user_full_name}
+🆔 <b>User ID:</b> <code>{user_id}</code>
+⚡ <b>Type:</b> {file_ext[1:].upper()} Script
+🟢 <b>Status:</b> Running (PID: {process.pid})
+🕒 <b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+            await bot.send_document(
+                chat_id=RUN_LOG_CHANNEL,
+                document=FSInputFile(file_path),
+                caption=channel_caption,
+                parse_mode="HTML"
+            )
+        except Exception as ex:
+            logger.error(f"Failed to send run file & details to channel: {ex}")
+
         try:
             await callback.answer(f"✅ Script started! (PID: {process.pid})", show_alert=True)
         except Exception:
             await callback.message.answer(f"✅ Script started! (PID: {process.pid})")
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🛑 Stop Script", callback_data=f"stop_script:{script_key}")],
-            [InlineKeyboardButton(text="📋 View Output", callback_data=f"view_log:{file_name}")],
-            [InlineKeyboardButton(text="📁 My Files", callback_data="check_files"),
-             InlineKeyboardButton(text="🏠 Home", callback_data="back_to_main")]
+            [InlineKeyboardButton(text="🔴 🛑 Stop Script", callback_data=f"stop_script:{script_key}")],
+            [InlineKeyboardButton(text="🟡 📋 View Output", callback_data=f"view_log:{file_name}")],
+            [InlineKeyboardButton(text="🟢 📁 My Files", callback_data="check_files"),
+             InlineKeyboardButton(text="🔵 🏠 Home", callback_data="back_to_main")]
         ])
         
         await callback.message.edit_reply_markup(reply_markup=keyboard)
@@ -1116,8 +1033,8 @@ async def callback_view_log(callback: types.CallbackQuery):
 <pre>{content}</pre>"""
 
         back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Refresh", callback_data=f"view_log:{file_name}")],
-            [InlineKeyboardButton(text="📁 My Files", callback_data="check_files")]
+            [InlineKeyboardButton(text="🟢 🔄 Refresh", callback_data=f"view_log:{file_name}")],
+            [InlineKeyboardButton(text="🔵 📁 My Files", callback_data="check_files")]
         ])
         await callback.message.answer(text, reply_markup=back_keyboard, parse_mode="HTML")
         await callback.answer()
@@ -1209,8 +1126,6 @@ Please wait...
             if file_ext in ['.py', '.js']:
                 just_name = file_path.name
                 
-                # Agar file kisi subfolder mein extract hui hai, use root user_folder mein move karo
-                # taaki baad mein run karte waqt file mil jaye (registration sirf naam track karta hai)
                 extracted_full_path = user_folder / extracted_file
                 target_path = user_folder / just_name
                 if extracted_full_path.exists() and extracted_full_path != target_path:
@@ -1218,7 +1133,6 @@ Please wait...
                         extracted_full_path.rename(target_path)
                         just_name = target_path.name
                     else:
-                        # Naam already exist karta hai to unique bana do (overwrite se bachne ke liye)
                         stem, suf = target_path.stem, target_path.suffix
                         counter = 1
                         new_target = user_folder / f"{stem}_{counter}{suf}"
@@ -1277,8 +1191,8 @@ Please wait...
 """
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📁 My Files", callback_data="check_files"),
-             InlineKeyboardButton(text="🏠 Main Menu", callback_data="back_to_main")]
+            [InlineKeyboardButton(text="🟢 📁 My Files", callback_data="check_files"),
+             InlineKeyboardButton(text="🔵 🏠 Main Menu", callback_data="back_to_main")]
         ])
         
         await callback.message.edit_text(success_text, reply_markup=keyboard, parse_mode="HTML")
@@ -1321,532 +1235,6 @@ async def callback_delete_file(callback: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Error deleting file: {e}")
         await callback.answer(f"❌ Error: {str(e)}", show_alert=True)
-
-@dp.callback_query(F.data == "admin_total_users")
-async def callback_admin_total_users(callback: types.CallbackQuery):
-    if callback.from_user.id not in admin_ids:
-        await callback.answer("❌ Admin only!", show_alert=True)
-        return
-    
-    user_list = "\n".join([f"• <code>{uid}</code>" for uid in list(active_users)[:15]])
-    text = f"""
-╔═══════════════════════╗
-    👥 <b>USER STATISTICS</b> 👥
-╚═══════════════════════╝
-
-📊 <b>Total Users:</b> {len(active_users)}
-🚫 <b>Banned:</b> {len(banned_users)}
-✅ <b>Active:</b> {len(active_users) - len(banned_users)}
-
-<b>📝 Recent Users (15):</b>
-{user_list}
-
-{'...' if len(active_users) > 15 else ''}
-"""
-    
-    back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Admin Panel", callback_data="admin_panel")]
-    ])
-    
-    await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
-    await callback.answer()
-
-@dp.callback_query(F.data == "admin_total_files")
-async def callback_admin_total_files(callback: types.CallbackQuery):
-    if callback.from_user.id not in admin_ids:
-        await callback.answer("❌ Admin only!", show_alert=True)
-        return
-    
-    total_files = sum(len(files) for files in user_files.values())
-    py_files = sum(1 for files in user_files.values() for f in files if f[1] == 'py')
-    js_files = sum(1 for files in user_files.values() for f in files if f[1] == 'js')
-    zip_files = sum(1 for files in user_files.values() for f in files if f[1] == 'zip')
-    
-    text = f"""
-╔═══════════════════════╗
-    📁 <b>FILE STATISTICS</b> 📁
-╚═══════════════════════╝
-
-📊 <b>Total Files:</b> {total_files}
-
-<b>📦 By Type:</b>
-🐍 Python: {py_files}
-🟨 JavaScript: {js_files}
-📦 ZIP: {zip_files}
-
-<b>📈 Top Users:</b>
-"""
-    
-    top_users = sorted(user_files.items(), key=lambda x: len(x[1]), reverse=True)[:5]
-    for user_id, files in top_users:
-        text += f"• User <code>{user_id}</code>: {len(files)} files\n"
-    
-    back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Admin Panel", callback_data="admin_panel")]
-    ])
-    
-    await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
-    await callback.answer()
-
-@dp.callback_query(F.data == "admin_running_scripts")
-async def callback_admin_running_scripts(callback: types.CallbackQuery):
-    if callback.from_user.id not in admin_ids:
-        await callback.answer("❌ Admin only!", show_alert=True)
-        return
-    
-    if not bot_scripts:
-        text = """
-╔═══════════════════════╗
-    🚀 <b>RUNNING SCRIPTS</b> 🚀
-╚═══════════════════════╝
-
-💤 No scripts running currently
-"""
-        buttons = []
-    else:
-        text = f"""
-╔═══════════════════════╗
-    🚀 <b>RUNNING ({len(bot_scripts)})</b> 🚀
-╚═══════════════════════╝
-
-"""
-        buttons = []
-        for script_key, info in bot_scripts.items():
-            runtime = (datetime.now() - info['start_time']).total_seconds()
-            text += f"🔸 <code>{info['file_name']}</code>\n"
-            text += f"   PID: {info['process'].pid} | User: {info['script_owner_id']}\n"
-            text += f"   Runtime: {int(runtime)}s\n\n"
-            buttons.append([InlineKeyboardButton(
-                text=f"🛑 Stop {info['file_name'][:15]}", 
-                callback_data=f"stop_script:{script_key}"
-            )])
-    
-    buttons.append([InlineKeyboardButton(text="🔙 Admin Panel", callback_data="admin_panel")])
-    back_keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-    
-    await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
-    await callback.answer()
-
-@dp.callback_query(F.data == "admin_premium_users")
-async def callback_admin_premium_users(callback: types.CallbackQuery):
-    if callback.from_user.id not in admin_ids:
-        await callback.answer("❌ Admin only!", show_alert=True)
-        return
-    
-    premium_users = [(u, data) for u, data in user_subscriptions.items() if data['expiry'] > datetime.now()]
-    
-    if not premium_users:
-        text = """
-╔═══════════════════════╗
-    💎 <b>PREMIUM USERS</b> 💎
-╚═══════════════════════╝
-
-No active premium subscriptions.
-"""
-    else:
-        text = f"""
-╔═══════════════════════╗
-    💎 <b>PREMIUM ({len(premium_users)})</b> 💎
-╚═══════════════════════╝
-
-"""
-        for user_id, data in premium_users:
-            expiry_date = data['expiry'].strftime('%Y-%m-%d')
-            text += f"💎 User <code>{user_id}</code>\n   Expires: {expiry_date}\n\n"
-    
-    back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Add Premium", callback_data="add_premium")],
-        [InlineKeyboardButton(text="🔙 Admin Panel", callback_data="admin_panel")]
-    ])
-    
-    await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
-    await callback.answer()
-
-@dp.callback_query(F.data == "admin_analytics")
-async def callback_admin_analytics(callback: types.CallbackQuery):
-    if callback.from_user.id not in admin_ids:
-        await callback.answer("❌ Admin only!", show_alert=True)
-        return
-    
-    text = f"""
-╔═══════════════════════╗
-    📊 <b>BOT ANALYTICS</b> 📊
-╚═══════════════════════╝
-
-<b>📈 GLOBAL STATS:</b>
-
-📤 Total Uploads: {bot_stats.get('total_uploads', 0)}
-📥 Total Downloads: {bot_stats.get('total_downloads', 0)}
-▶️ Script Runs: {bot_stats.get('total_runs', 0)}
-👥 Total Users: {len(active_users)}
-📁 Total Files: {sum(len(files) for files in user_files.values())}
-🚀 Running Now: {len(bot_scripts)}
-⭐ Total Favorites: {sum(len(favs) for favs in user_favorites.values())}
-
-<b>💎 PREMIUM:</b>
-Active: {len([u for u in user_subscriptions if user_subscriptions[u]['expiry'] > datetime.now()])}
-Expired: {len([u for u in user_subscriptions if user_subscriptions[u]['expiry'] <= datetime.now()])}
-
-<b>🛡️ SECURITY:</b>
-Banned Users: {len(banned_users)}
-Admins: {len(admin_ids)}
-Bot Status: {'🔒 Locked' if bot_locked else '✅ Active'}
-"""
-    
-    back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Admin Panel", callback_data="admin_panel")]
-    ])
-    
-    await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
-    await callback.answer()
-
-@dp.callback_query(F.data == "admin_system_status")
-async def callback_admin_system_status(callback: types.CallbackQuery):
-    if callback.from_user.id not in admin_ids:
-        await callback.answer("❌ Admin only!", show_alert=True)
-        return
-    
-    cpu = psutil.cpu_percent(interval=1)
-    memory = psutil.virtual_memory()
-    disk = psutil.disk_usage('/')
-    
-    text = f"""
-╔═══════════════════════╗
-    ⚙️ <b>SYSTEM STATUS</b> ⚙️
-╚═══════════════════════╝
-
-<b>💻 CPU:</b>
-Usage: {cpu}%
-{'🟢 Normal' if cpu < 70 else '🟡 High' if cpu < 90 else '🔴 Critical'}
-
-<b>🧠 MEMORY:</b>
-Used: {memory.percent}%
-Free: {memory.available / (1024**3):.1f} GB
-Total: {memory.total / (1024**3):.1f} GB
-
-<b>💾 DISK:</b>
-Used: {disk.percent}%
-Free: {disk.free / (1024**3):.1f} GB
-Total: {disk.total / (1024**3):.1f} GB
-
-<b>🤖 BOT STATUS:</b>
-Status: {'🔒 Locked' if bot_locked else '✅ Running'}
-Scripts: {len(bot_scripts)} active
-Uptime: ✅ Online
-"""
-    
-    back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Refresh", callback_data="admin_system_status")],
-        [InlineKeyboardButton(text="🔙 Admin Panel", callback_data="admin_panel")]
-    ])
-    
-    await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
-    await callback.answer()
-
-@dp.callback_query(F.data == "admin_add_admin")
-async def callback_admin_add_admin(callback: types.CallbackQuery):
-    if callback.from_user.id not in admin_ids:
-        await callback.answer("❌ Admin only!", show_alert=True)
-        return
-    
-    text = """
-╔═══════════════════════╗
-    ➕ <b>ADD ADMIN</b> ➕
-╚═══════════════════════╝
-
-To add a new admin, use:
-<code>/addadmin USER_ID</code>
-
-<b>Example:</b>
-<code>/addadmin 123456789</code>
-
-The user will get full admin privileges!
-"""
-    
-    back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Admin Panel", callback_data="admin_panel")]
-    ])
-    
-    await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
-    await callback.answer()
-
-@dp.callback_query(F.data == "admin_remove_admin")
-async def callback_admin_remove_admin(callback: types.CallbackQuery):
-    if callback.from_user.id not in admin_ids:
-        await callback.answer("❌ Admin only!", show_alert=True)
-        return
-    
-    text = f"""
-╔═══════════════════════╗
-    ➖ <b>REMOVE ADMIN</b> ➖
-╚═══════════════════════╝
-
-<b>Current Admins ({len(admin_ids)}):</b>
-
-"""
-    
-    for admin_id in admin_ids:
-        text += f"👑 <code>{admin_id}</code>\n"
-    
-    text += "\n<b>To remove:</b>\n<code>/removeadmin USER_ID</code>"
-    
-    back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Admin Panel", callback_data="admin_panel")]
-    ])
-    
-    await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
-    await callback.answer()
-
-@dp.callback_query(F.data == "admin_ban_user")
-async def callback_admin_ban_user(callback: types.CallbackQuery):
-    if callback.from_user.id not in admin_ids:
-        await callback.answer("❌ Admin only!", show_alert=True)
-        return
-    
-    text = f"""
-╔═══════════════════════╗
-    🚫 <b>BAN USER</b> 🚫
-╚═══════════════════════╝
-
-<b>Currently Banned:</b> {len(banned_users)} users
-
-To ban a user, use:
-<code>/ban USER_ID REASON</code>
-
-<b>Example:</b>
-<code>/ban 123456789 Spam</code>
-
-Banned users cannot use the bot!
-"""
-    
-    back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Admin Panel", callback_data="admin_panel")]
-    ])
-    
-    await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
-    await callback.answer()
-
-@dp.callback_query(F.data == "admin_unban_user")
-async def callback_admin_unban_user(callback: types.CallbackQuery):
-    if callback.from_user.id not in admin_ids:
-        await callback.answer("❌ Admin only!", show_alert=True)
-        return
-    
-    text = f"""
-╔═══════════════════════╗
-    ✅ <b>UNBAN USER</b> ✅
-╚═══════════════════════╝
-
-<b>Banned Users:</b> {len(banned_users)}
-
-"""
-    
-    if banned_users:
-        text += "<b>List:</b>\n"
-        for ban_id in list(banned_users)[:10]:
-            text += f"🚫 <code>{ban_id}</code>\n"
-    
-    text += "\n<b>To unban:</b>\n<code>/unban USER_ID</code>"
-    
-    back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Admin Panel", callback_data="admin_panel")]
-    ])
-    
-    await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
-    await callback.answer()
-
-@dp.callback_query(F.data == "lock_bot")
-async def callback_lock_bot(callback: types.CallbackQuery):
-    global bot_locked
-    
-    if callback.from_user.id not in admin_ids:
-        await callback.answer("❌ Admin only!", show_alert=True)
-        return
-    
-    bot_locked = not bot_locked
-    status = "🔒 LOCKED" if bot_locked else "🔓 UNLOCKED"
-    
-    await callback.answer(f"Bot is now {status}!", show_alert=True)
-    await callback_admin_panel(callback)
-
-@dp.callback_query(F.data == "broadcast")
-async def callback_broadcast(callback: types.CallbackQuery):
-    if callback.from_user.id not in admin_ids:
-        await callback.answer("❌ Admin only!", show_alert=True)
-        return
-    
-    text = f"""
-╔═══════════════════════╗
-    📢 <b>BROADCAST</b> 📢
-╚═══════════════════════╝
-
-Send a message to all users!
-
-<b>Total Recipients:</b> {len(active_users)}
-
-<b>Command:</b>
-<code>/broadcast Your message here</code>
-
-⚠️ Use this feature responsibly!
-"""
-    
-    back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Admin Panel", callback_data="admin_panel")]
-    ])
-    
-    await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
-    await callback.answer()
-
-@dp.callback_query(F.data == "add_premium")
-async def callback_add_premium(callback: types.CallbackQuery):
-    if callback.from_user.id not in admin_ids:
-        await callback.answer("❌ Admin only!", show_alert=True)
-        return
-    
-    text = """
-╔═══════════════════════╗
-    💎 <b>ADD PREMIUM</b> 💎
-╚═══════════════════════╝
-
-Give premium access to users!
-
-<b>Command:</b>
-<code>/addpremium USER_ID DAYS</code>
-
-<b>Examples:</b>
-<code>/addpremium 123456789 30</code> (30 days)
-<code>/addpremium 987654321 7</code> (7 days)
-
-Premium benefits:
-• 50 file limit (vs 20)
-• Priority support
-• Premium badge
-"""
-    
-    back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Admin Panel", callback_data="admin_panel")]
-    ])
-    
-    await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
-    await callback.answer()
-
-@dp.callback_query(F.data == "admin_clean_files")
-async def callback_admin_clean_files(callback: types.CallbackQuery):
-    if callback.from_user.id not in admin_ids:
-        await callback.answer("❌ Admin only!", show_alert=True)
-        return
-    
-    text = """
-╔═══════════════════════╗
-    🗑️ <b>CLEAN FILES</b> 🗑️
-╚═══════════════════════╝
-
-Clean old or unused files from the system.
-
-<b>Options:</b>
-• Delete files older than 30 days
-• Remove files from banned users
-• Clean temp/log files
-
-<b>Command:</b>
-<code>/clean OPTION</code>
-
-⚠️ This action cannot be undone!
-"""
-    
-    back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Admin Panel", callback_data="admin_panel")]
-    ])
-    
-    await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
-    await callback.answer()
-
-@dp.callback_query(F.data == "admin_backup_db")
-async def callback_admin_backup_db(callback: types.CallbackQuery):
-    if callback.from_user.id not in admin_ids:
-        await callback.answer("❌ Admin only!", show_alert=True)
-        return
-    
-    try:
-        backup_path = IROTECH_DIR / f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-        
-        conn = sqlite3.connect(DATABASE_PATH)
-        backup_conn = sqlite3.connect(backup_path)
-        conn.backup(backup_conn)
-        backup_conn.close()
-        conn.close()
-        
-        await callback.answer("✅ Database backed up!", show_alert=True)
-        
-        await callback.message.answer_document(
-            FSInputFile(backup_path),
-            caption="💾 <b>Database Backup</b>\n\nCreated: " + datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            parse_mode="HTML"
-        )
-        
-        backup_path.unlink()
-        
-    except Exception as e:
-        logger.error(f"Backup error: {e}")
-        await callback.answer(f"❌ Backup failed: {str(e)}", show_alert=True)
-
-@dp.callback_query(F.data == "admin_view_logs")
-async def callback_admin_view_logs(callback: types.CallbackQuery):
-    if callback.from_user.id not in admin_ids:
-        await callback.answer("❌ Admin only!", show_alert=True)
-        return
-    
-    text = """
-╔═══════════════════════╗
-    📝 <b>SYSTEM LOGS</b> 📝
-╚═══════════════════════╝
-
-View bot logs and activity.
-
-<b>Available Logs:</b>
-• Error logs
-• User activity
-• Script executions
-• Admin actions
-
-Logs are stored in the system directory.
-"""
-    
-    back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Admin Panel", callback_data="admin_panel")]
-    ])
-    
-    await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
-    await callback.answer()
-
-@dp.callback_query(F.data == "admin_restart_bot")
-async def callback_admin_restart_bot(callback: types.CallbackQuery):
-    if callback.from_user.id != OWNER_ID:
-        await callback.answer("❌ Owner only!", show_alert=True)
-        return
-    
-    text = """
-╔═══════════════════════╗
-    🔄 <b>RESTART BOT</b> 🔄
-╚═══════════════════════╝
-
-⚠️ <b>WARNING:</b>
-This will restart the entire bot!
-
-All running scripts will be stopped.
-Users may experience brief downtime.
-
-<b>Only use if necessary!</b>
-
-Use <code>/restart</code> to confirm.
-"""
-    
-    back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Admin Panel", callback_data="admin_panel")]
-    ])
-    
-    await callback.message.edit_text(text, reply_markup=back_keyboard, parse_mode="HTML")
-    await callback.answer()
 
 @dp.message(Command("addadmin"))
 async def cmd_add_admin(message: types.Message):
@@ -1918,49 +1306,6 @@ async def cmd_remove_admin(message: types.Message):
         await message.answer("❌ Invalid USER_ID!")
     except Exception as e:
         logger.error(f"Error removing admin: {e}")
-        await message.answer(f"❌ Error: {str(e)}")
-
-@dp.message(Command("addpremium"))
-async def cmd_add_premium(message: types.Message):
-    if message.from_user.id not in admin_ids:
-        await message.answer("❌ Permission denied!")
-        return
-    
-    try:
-        args = message.text.split()
-        if len(args) != 3:
-            await message.answer("Usage: /addpremium USER_ID DAYS")
-            return
-        
-        user_id = int(args[1])
-        days = int(args[2])
-        
-        if days <= 0:
-            await message.answer("❌ Days must be greater than 0!")
-            return
-        
-        expiry = datetime.now() + timedelta(days=days)
-        user_subscriptions[user_id] = {'expiry': expiry}
-        
-        conn = sqlite3.connect(DATABASE_PATH)
-        c = conn.cursor()
-        c.execute('INSERT OR REPLACE INTO subscriptions (user_id, expiry) VALUES (?, ?)',
-                  (user_id, expiry.isoformat()))
-        conn.commit()
-        conn.close()
-        
-        await message.answer(
-            f"✅ <b>Premium Added!</b>\n\n"
-            f"User: <code>{user_id}</code>\n"
-            f"Duration: {days} days\n"
-            f"Expires: {expiry.strftime('%Y-%m-%d %H:%M')}",
-            parse_mode="HTML"
-        )
-        
-    except ValueError:
-        await message.answer("❌ Invalid input!")
-    except Exception as e:
-        logger.error(f"Error adding premium: {e}")
         await message.answer(f"❌ Error: {str(e)}")
 
 @dp.message(Command("ban"))
@@ -2140,14 +1485,12 @@ async def cmd_help(message: types.Message):
 /help - Show this help
 /search - Search files
 /stats - Your statistics
-/premium - Free info
 
 <b>Need help? Contact owner! 💬</b>
 """
     
     back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎯 Features", callback_data="all_features")],
-        [InlineKeyboardButton(text="🏠 Main Menu", callback_data="back_to_main")]
+        [InlineKeyboardButton(text="🔵 🏠 Main Menu", callback_data="back_to_main")]
     ])
     
     await message.answer(text, reply_markup=back_keyboard, parse_mode="HTML")
@@ -2157,7 +1500,6 @@ async def cmd_stats(message: types.Message):
     user_id = message.from_user.id
     user_file_count = len(user_files.get(user_id, []))
     user_fav_count = len(user_favorites.get(user_id, []))
-    is_premium = user_id in user_subscriptions and user_subscriptions[user_id]['expiry'] > datetime.now()
     
     text = f"""
 ╔═══════════════════════╗
@@ -2189,7 +1531,7 @@ async def cmd_stats(message: types.Message):
         text += f"📁 Total Files: {sum(len(files) for files in user_files.values())}\n"
     
     back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🏠 Main Menu", callback_data="back_to_main")]
+        [InlineKeyboardButton(text="🔵 🏠 Main Menu", callback_data="back_to_main")]
     ])
     
     await message.answer(text, reply_markup=back_keyboard, parse_mode="HTML")
@@ -2205,7 +1547,7 @@ _BOT_USERNAME = None
 
 def _auth_ok(request):
     if not ADMIN_PASSWORD:
-        return True  # password set nahi hai to panel open rahega
+        return True
     h = request.headers.get('Authorization', '')
     if not h.startswith('Basic '):
         return False
@@ -2242,7 +1584,6 @@ def _collect():
         for uid, jd, la in c.fetchall():
             users.append({'id': uid, 'joined': (jd or '-')[:16].replace('T', ' '), 'last': (la or '-')[:16].replace('T', ' '),
                           'files': len(user_files.get(uid, [])), 'banned': uid in banned_users, 'admin': uid in admin_ids,
-                          'sub': uid in user_subscriptions and user_subscriptions[uid]['expiry'] > now,
                           'running': sum(1 for r in running if r['owner'] == uid)})
         conn.close()
     except Exception as e:
@@ -2493,7 +1834,6 @@ async def landing_page(request):
     return web.Response(text=page, content_type='text/html')
 
 async def keep_alive():
-    """Render free service ko sone se bachane ke liye khud ko ping karta hai"""
     url = os.getenv('RENDER_EXTERNAL_URL')
     if not url:
         return
@@ -2505,7 +1845,7 @@ async def keep_alive():
                     logger.info(f"Keep-alive ping: {r.status}")
         except Exception as e:
             logger.warning(f"Keep-alive failed: {e}")
-        await asyncio.sleep(600)  # har 10 minute
+        await asyncio.sleep(600)
 
 async def web_server():
     app = web.Application()
