@@ -1,8 +1,7 @@
-import asyncio
 import logging
 
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes
+from telegram.ext import Application, ApplicationBuilder, ContextTypes
 
 from config import BOT_TOKEN
 from database import init_db
@@ -28,28 +27,42 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
             logger.exception("Could not send error reply")
 
 
+async def post_init(application: Application) -> None:
+    # SQLite init PTB ke apne event loop ke ANDAR hota hai.
+    # Pehle asyncio.run(init_db()) tha, jo loop band karke "no current event
+    # loop" error deta tha jab run_polling() chalta tha.
+    await init_db()
+    logger.info("Database initialized")
+
+
 def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError(
             "BOT_TOKEN missing hai. Railway Variables mein BOT_TOKEN set karo."
         )
 
-    # Initialize SQLite before python-telegram-bot starts its own event loop.
-    asyncio.run(init_db())
-    logger.info("Database initialized")
+    application = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
 
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
     for handler in get_user_handlers():
         application.add_handler(handler)
+
     for handler in get_admin_handlers():
         application.add_handler(handler)
+
     for handler in get_clone_handlers():
         application.add_handler(handler)
 
     application.add_error_handler(error_handler)
+
     logger.info("Bot is starting")
-    # run_polling() manages the event loop itself; do not await it.
-    application.run_polling( drop_pending_updates=True )
+
+    # run_polling() apna event loop khud manage karta hai; await mat karo.
+    application.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
