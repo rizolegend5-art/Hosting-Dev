@@ -1,0 +1,11 @@
+# Auto Generated Config File
+BOT_TOKEN = "{{BOT_TOKEN}}"
+OWNER_ID = {{OWNER_ID}}
+DEV_NAME = "{{DEV_NAME}}"
+WELCOME_MESSAGE = """{{WELCOME_MSG}}"""
+BOT_USERNAME = "{{BOT_USERNAME}}"
+ENABLED_FEATURES = {{ENABLED_FEATURES}}
+CONFIG_FILENAME = "{{CONFIG_FILENAME}}"
+
+# 7 Rainbow Colors Buttons
+RAINBOW_EMOJIS = ["🔴", "🟠", "🟡", "🟢", "🔵", "🟣", "🟤"]
