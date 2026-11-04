@@ -77,3 +77,12 @@ IMPORTANT HOSTING NOTES
 - Each clone must be a bot token you control or are explicitly authorized to
   operate. Keep clone tokens private and use BotFather to revoke compromised
   tokens.
+
+
+RAILWAY BUILD FIX (2026-11-04)
+-----------------------------
+The Nix environment now explicitly includes python311Packages.pip and uses
+the project's requirements.txt during the install phase. This addresses
+the observed `No module named pip` build failure. It cannot guarantee a
+successful deployment if a later dependency, variable, or runtime error
+occurs; inspect the next Railway build/deploy logs if another error appears.

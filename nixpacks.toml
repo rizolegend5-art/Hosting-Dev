@@ -1,8 +1,10 @@
+# Explicitly include pip in the Nix environment.
 [phases.setup]
-nixPkgs = ["python311", "nodejs_20", "gcc"]
+nixPkgs = ["python311", "python311Packages.pip", "nodejs_20", "gcc"]
 
+# Avoid Nixpacks' failing implicit `python -m pip install --upgrade pip`.
 [phases.install]
-cmds = ["python -m pip install --upgrade pip", "pip install -r requirements.txt"]
+cmds = ["python -m pip install --no-cache-dir -r requirements.txt"]
 
 [start]
 cmd = "python bot.py"
