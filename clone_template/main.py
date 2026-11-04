@@ -1,1 +1,107 @@
-import loggingfrom telegram import Update, InlineKeyboardButton, InlineKeyboardMarkupfrom telegram.ext import (    ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler)import configlogging.basicConfig(level=logging.INFO)def rainbow_btn(text, callback_data, color_idx=0):    emoji = config.RAINBOW_EMOJIS[color_idx % len(config.RAINBOW_EMOJIS)]    return InlineKeyboardButton(f"{emoji} {text}", callback_data=callback_data)async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):    user = update.effective_user        keyboard = []    if "file_share" in config.ENABLED_FEATURES:        keyboard.append([rainbow_btn("📁 File Share", "file_share", 0)])    if "auto_reply" in config.ENABLED_FEATURES:        keyboard.append([rainbow_btn("💬 Auto Reply", "auto_reply", 1)])    if "stats" in config.ENABLED_FEATURES:        keyboard.append([rainbow_btn("📊 Bot Stats", "bot_stats", 2)])        keyboard.append([rainbow_btn("❓ Help", "help", 3)])    keyboard.append([rainbow_btn("👤 Developer", "dev_info", 4)])        welcome_msg = config.WELCOME_MESSAGE.replace("{user}", user.first_name)        await update.message.reply_text(        welcome_msg,        reply_markup=InlineKeyboardMarkup(keyboard),        parse_mode="Markdown"    )async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):    await update.message.reply_text("❓ Help menu:\n/start - Start bot\n/admin - Admin panel (owner only)")async def dev_info(update: Update, context: ContextTypes.DEFAULT_TYPE):    await update.callback_query.answer()    await update.callback_query.edit_message_text(        f"👨‍💻 Developer: {config.DEV_NAME}\n🤖 Bot: @{config.BOT_USERNAME}",        reply_markup=InlineKeyboardMarkup([            [rainbow_btn("🔙 Back", "back_to_start", 6)]        ])    )async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):    if update.effective_user.id != config.OWNER_ID:        await update.message.reply_text("❌ Aap admin nahi ho!")        return        keyboard = []    if "broadcast" in config.ENABLED_FEATURES:        keyboard.append([rainbow_btn("📢 Broadcast", "admin_broadcast", 0)])    if "ban_system" in config.ENABLED_FEATURES:        keyboard.append([rainbow_btn("🚫 Ban/Unban", "admin_ban", 1)])    if "stats" in config.ENABLED_FEATURES:        keyboard.append([rainbow_btn("📊 User Stats", "admin_stats", 2)])        keyboard.append([rainbow_btn("🔙 Back", "back_to_start", 6)])        await update.message.reply_text(        "🔐 Admin Panel",        reply_markup=InlineKeyboardMarkup(keyboard)    )async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):    query = update.callback_query    await query.answer()        if query.data == "back_to_start":        user = query.from_user        keyboard = []        if "file_share" in config.ENABLED_FEATURES:            keyboard.append([rainbow_btn("📁 File Share", "file_share", 0)])        if "auto_reply" in config.ENABLED_FEATURES:            keyboard.append([rainbow_btn("💬 Auto Reply", "auto_reply", 1)])        if "stats" in config.ENABLED_FEATURES:            keyboard.append([rainbow_btn("📊 Bot Stats", "bot_stats", 2)])        keyboard.append([rainbow_btn("❓ Help", "help", 3)])        keyboard.append([rainbow_btn("👤 Developer", "dev_info", 4)])                welcome_msg = config.WELCOME_MESSAGE.replace("{user}", user.first_name)        await query.edit_message_text(welcome_msg, reply_markup=InlineKeyboardMarkup(keyboard))        elif query.data == "dev_info":        await dev_info(update, context)        elif query.data == "help":        await query.edit_message_text("❓ Help:\n/start - Start bot\n/admin - Admin panel",                                     reply_markup=InlineKeyboardMarkup([                                         [rainbow_btn("🔙 Back", "back_to_start", 6)]                                     ]))def main():    app = ApplicationBuilder().token(config.BOT_TOKEN).build()        app.add_handler(CommandHandler("start", start))    app.add_handler(CommandHandler("help", help_cmd))    app.add_handler(CommandHandler("admin", admin_panel))    app.add_handler(CallbackQueryHandler(callback_handler))        app.run_polling()if __name__ == "__main__":    main()
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
+)
+import config
+
+logging.basicConfig(level=logging.INFO)
+
+def rainbow_btn(text, callback_data, color_idx=0):
+    emoji = config.RAINBOW_EMOJIS[color_idx % len(config.RAINBOW_EMOJIS)]
+    return InlineKeyboardButton(f"{emoji} {text}", callback_data=callback_data)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    keyboard = []
+    if "file_share" in config.ENABLED_FEATURES:
+        keyboard.append([rainbow_btn("📁 File Share", "file_share", 0)])
+    if "auto_reply" in config.ENABLED_FEATURES:
+        keyboard.append([rainbow_btn("💬 Auto Reply", "auto_reply", 1)])
+    if "stats" in config.ENABLED_FEATURES:
+        keyboard.append([rainbow_btn("📊 Bot Stats", "bot_stats", 2)])
+    
+    keyboard.append([rainbow_btn("❓ Help", "help", 3)])
+    keyboard.append([rainbow_btn("👤 Developer", "dev_info", 4)])
+    
+    welcome_msg = config.WELCOME_MESSAGE.replace("{user}", user.first_name)
+    
+    await update.message.reply_text(
+        welcome_msg,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❓ Help menu:\n/start - Start bot\n/admin - Admin panel (owner only)")
+
+async def dev_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await update.callback_query.edit_message_text(
+        f"👨‍💻 Developer: {config.DEV_NAME}\n🤖 Bot: @{config.BOT_USERNAME}",
+        reply_markup=InlineKeyboardMarkup([
+            [rainbow_btn("🔙 Back", "back_to_start", 6)]
+        ])
+    )
+
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != config.OWNER_ID:
+        await update.message.reply_text("❌ Aap admin nahi ho!")
+        return
+    
+    keyboard = []
+    if "broadcast" in config.ENABLED_FEATURES:
+        keyboard.append([rainbow_btn("📢 Broadcast", "admin_broadcast", 0)])
+    if "ban_system" in config.ENABLED_FEATURES:
+        keyboard.append([rainbow_btn("🚫 Ban/Unban", "admin_ban", 1)])
+    if "stats" in config.ENABLED_FEATURES:
+        keyboard.append([rainbow_btn("📊 User Stats", "admin_stats", 2)])
+    
+    keyboard.append([rainbow_btn("🔙 Back", "back_to_start", 6)])
+    
+    await update.message.reply_text(
+        "🔐 Admin Panel",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "back_to_start":
+        user = query.from_user
+        keyboard = []
+        if "file_share" in config.ENABLED_FEATURES:
+            keyboard.append([rainbow_btn("📁 File Share", "file_share", 0)])
+        if "auto_reply" in config.ENABLED_FEATURES:
+            keyboard.append([rainbow_btn("💬 Auto Reply", "auto_reply", 1)])
+        if "stats" in config.ENABLED_FEATURES:
+            keyboard.append([rainbow_btn("📊 Bot Stats", "bot_stats", 2)])
+        keyboard.append([rainbow_btn("❓ Help", "help", 3)])
+        keyboard.append([rainbow_btn("👤 Developer", "dev_info", 4)])
+        
+        welcome_msg = config.WELCOME_MESSAGE.replace("{user}", user.first_name)
+        await query.edit_message_text(welcome_msg, reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    elif query.data == "dev_info":
+        await dev_info(update, context)
+    
+    elif query.data == "help":
+        await query.edit_message_text("❓ Help:\n/start - Start bot\n/admin - Admin panel",
+                                     reply_markup=InlineKeyboardMarkup([
+                                         [rainbow_btn("🔙 Back", "back_to_start", 6)]
+                                     ]))
+
+def main():
+    app = ApplicationBuilder().token(config.BOT_TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CallbackQueryHandler(callback_handler))
+    
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
