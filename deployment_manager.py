@@ -226,7 +226,7 @@ async def generate_clone_bot(clone_id, bot_data):
     if os.path.exists(main_path):
         with open(main_path, "r", encoding="utf-8") as f:
             main_content = f.read()
-        main_content = main_content.replace("import config_template", f"import {config_name.replace('.py', '')} as config")
+        main_content = main_content.replace("import config", f"import {config_name.replace('.py', '')} as config", 1)
         with open(main_path, "w", encoding="utf-8") as f:
             f.write(main_content)
     
