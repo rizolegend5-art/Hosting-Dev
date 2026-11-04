@@ -19,6 +19,7 @@ from aiohttp import web
 import aiohttp
 from pathlib import Path
 from dotenv import load_dotenv
+from clone_manager import CloneManager
 
 load_dotenv()
 
@@ -192,6 +193,10 @@ init_db()
 migrate_db()
 load_data()
 
+# Clone Bot subsystem: separate dispatchers, encrypted stored tokens, persistent registry.
+CLONE_ENCRYPTION_KEY = os.getenv('CLONE_ENCRYPTION_KEY') or TOKEN
+clone_manager = CloneManager(DATABASE_PATH, CLONE_ENCRYPTION_KEY, admin_ids, BASE_DIR / 'clone_data')
+
 # ── AUTO DEPENDENCY INSTALLER ────────────────────────
 IMPORT_TO_PIP = {
     'telebot': 'pyTelegramBotAPI',
@@ -277,6 +282,7 @@ def get_main_keyboard(user_id):
              InlineKeyboardButton(text="🔵 🔍 Search Files", callback_data="search_files")],
             [InlineKeyboardButton(text="🟣 ⚡ Bot Speed", callback_data="bot_speed"),
              InlineKeyboardButton(text="🟤 📊 My Stats", callback_data="statistics")],
+            [InlineKeyboardButton(text="🤖 Clone Bot", callback_data="clone_begin")],
             [InlineKeyboardButton(text="🔴 👑 Admin Panel", callback_data="admin_panel")],
             [InlineKeyboardButton(text="✨ 💬 Contact Support", url=f"https://t.me/{YOUR_USERNAME.replace('@', '')}")]
         ])
@@ -289,6 +295,7 @@ def get_main_keyboard(user_id):
              InlineKeyboardButton(text="🔵 🔍 Search Files", callback_data="search_files")],
             [InlineKeyboardButton(text="🟣 ⚡ Bot Speed", callback_data="bot_speed"),
              InlineKeyboardButton(text="🟤 📊 My Stats", callback_data="statistics")],
+            [InlineKeyboardButton(text="🤖 Clone Bot", callback_data="clone_begin")],
             [InlineKeyboardButton(text="✨ 💬 Contact Owner", url=f"https://t.me/{YOUR_USERNAME.replace('@', '')}")]
         ])
     return keyboard
@@ -298,6 +305,7 @@ def get_admin_panel_keyboard():
         [InlineKeyboardButton(text="🔴 ⏱️ Bot Uptime", callback_data="admin_bot_uptime")],
         [InlineKeyboardButton(text="🟡 👥 Total Users", callback_data="admin_total_users_simple")],
         [InlineKeyboardButton(text="🟢 📝 System Logs", callback_data="admin_view_logs")],
+        [InlineKeyboardButton(text="🤖 Clone Bot Manager", callback_data="admin_clones")],
         [InlineKeyboardButton(text="🔵 🏠 Main Menu", callback_data="back_to_main")]
     ])
     return keyboard
@@ -1537,6 +1545,79 @@ async def cmd_stats(message: types.Message):
     await message.answer(text, reply_markup=back_keyboard, parse_mode="HTML")
 
 
+# ── CLONE BOT WIZARD & ADMIN MANAGEMENT ─────────────────────────
+@dp.callback_query(F.data == "clone_begin")
+async def clone_begin(callback: types.CallbackQuery):
+    if callback.from_user.id in banned_users:
+        await callback.answer("Access denied", show_alert=True); return
+    await clone_manager.begin(callback.message)
+    await callback.answer()
+
+@dp.callback_query(F.data == "clone_confirm")
+async def clone_confirm(callback: types.CallbackQuery):
+    await clone_manager.confirm(callback, bot)
+
+@dp.callback_query(F.data == "clone_cancel")
+async def clone_cancel(callback: types.CallbackQuery):
+    clone_manager.sessions.pop(callback.from_user.id, None)
+    await callback.message.edit_text("❌ Clone setup cancelled.")
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_clones")
+async def admin_clones(callback: types.CallbackQuery):
+    if callback.from_user.id not in admin_ids:
+        await callback.answer("Admin access required", show_alert=True); return
+    rows = clone_manager.rows()
+    text = f"🤖 <b>CLONE BOT MANAGER</b>\nTotal clones: <b>{len(rows)}</b>\nRunning: <b>{sum(1 for r in rows if r[6]=='running')}</b>\n\n"
+    kb=[]
+    for r in rows[:25]:
+        text += f"@{r[1]} | Owner: {r[2]} | {r[6]}\n"
+        kb.append([
+            InlineKeyboardButton(text=f"▶️ Start @{r[1]}", callback_data=f"clone_start:{r[0]}"),
+            InlineKeyboardButton(text=f"🛑 Stop", callback_data=f"clone_stop:{r[0]}")
+        ])
+    if rows:
+        kb.append([InlineKeyboardButton(text="🛑 Stop ALL Clones", callback_data="clone_stop_all")])
+    kb.append([InlineKeyboardButton(text="🔙 Back", callback_data="admin_panel")])
+    await callback.message.edit_text(text[:4000],reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("clone_start:"))
+async def admin_clone_start(callback: types.CallbackQuery):
+    if callback.from_user.id not in admin_ids:
+        await callback.answer("Admin access required", show_alert=True); return
+    try:
+        bot_id = int(callback.data.split(':', 1)[1])
+        await clone_manager.start(bot_id)
+        await callback.answer("Clone start requested")
+    except Exception as exc:
+        await callback.answer(f"Start failed: {str(exc)[:150]}", show_alert=True)
+    await admin_clones(callback)
+
+@dp.callback_query(F.data == "clone_stop_all")
+async def admin_clone_stop_all(callback: types.CallbackQuery):
+    if callback.from_user.id not in admin_ids:
+        await callback.answer("Admin access required", show_alert=True); return
+    for row in clone_manager.rows():
+        await clone_manager.stop(row[0])
+    await callback.answer("All clone bots stopped")
+    await admin_clones(callback)
+
+@dp.callback_query(F.data.startswith("clone_stop:"))
+async def admin_clone_stop(callback: types.CallbackQuery):
+    if callback.from_user.id not in admin_ids:
+        await callback.answer("Admin access required",show_alert=True); return
+    try: bot_id=int(callback.data.split(':',1)[1])
+    except ValueError: await callback.answer("Invalid clone ID",show_alert=True); return
+    await clone_manager.stop(bot_id)
+    await callback.answer("Clone stopped")
+    await admin_clones(callback)
+
+@dp.message()
+async def clone_setup_catchall(message: types.Message):
+    # Only consumes messages while the sender is in the clone setup wizard.
+    await clone_manager.handle_setup_message(message)
+
 # ── WEBSITE: LANDING PAGE + ADMIN PANEL ──────────────
 import base64
 import hmac
@@ -1546,8 +1627,9 @@ ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', '')
 _BOT_USERNAME = None
 
 def _auth_ok(request):
+    # Fail closed: never expose the admin dashboard without a configured password.
     if not ADMIN_PASSWORD:
-        return True
+        return False
     h = request.headers.get('Authorization', '')
     if not h.startswith('Basic '):
         return False
@@ -1559,7 +1641,7 @@ def _auth_ok(request):
 
 def _deny():
     if not ADMIN_PASSWORD:
-        return web.Response(text="Panel off hai. Render Environment mein ADMIN_PASSWORD set karo.", status=503)
+        return web.Response(text="Admin panel disabled: Railway Variables mein strong ADMIN_PASSWORD set karein.", status=503)
     return web.Response(status=401, headers={'WWW-Authenticate': 'Basic realm="Admin"'}, text="Login required")
 
 def _running_list():
@@ -1613,7 +1695,7 @@ def _collect():
     except Exception:
         ram = 0
     up = now - BOT_START_TIME
-    return {'total_users': len(active_users), 'banned': len(banned_users), 'admins': len(admin_ids),
+    return {'total_users': len(active_users), 'clone_total': clone_manager.count(), 'clone_bots': [{'bot_id':r[0],'username':r[1],'owner_id':r[2],'developer':r[3],'status':r[6]} for r in clone_manager.rows()], 'banned': len(banned_users), 'admins': len(admin_ids),
             'total_files': sum(len(f) for f in user_files.values()), 'running_now': len(running),
             'uploads': bot_stats.get('total_uploads', 0), 'downloads': bot_stats.get('total_downloads', 0),
             'runs': bot_stats.get('total_runs', 0), 'locked': bot_locked,
@@ -1671,6 +1753,15 @@ async def panel_action(request):
 
     if act in ('ban', 'unban', 'stop_user') and uid is None:
         return web.json_response({'ok': False, 'msg': 'User ID chahiye'})
+    if act == 'clone_stop':
+        try: clone_id=int(d.get('bot_id'))
+        except (TypeError,ValueError): return web.json_response({'ok':False,'msg':'Invalid bot ID'})
+        await clone_manager.stop(clone_id)
+        return web.json_response({'ok':True,'msg':f'Clone {clone_id} stopped'})
+    if act == 'clone_start':
+        try: clone_id=int(d.get('bot_id')); await clone_manager.start(clone_id)
+        except Exception as e: return web.json_response({'ok':False,'msg':str(e)[:200]})
+        return web.json_response({'ok':True,'msg':f'Clone {clone_id} started'})
     if act == 'ban':
         if uid in admin_ids:
             return web.json_response({'ok': False, 'msg': 'Admin ko ban nahi kar sakte'})
@@ -1739,7 +1830,7 @@ input,textarea{background:#0b0f17;color:#e6edf3;border:1px solid #30363d;border-
 <div id="side"><div class="logo">🚀 Genius <span>HostBot</span></div>
 <button class="nav on" data-p="over">📊 Overview</button><button class="nav" data-p="bots">🤖 Running Bots</button>
 <button class="nav" data-p="files">📁 All Files</button><button class="nav" data-p="users">👥 Users</button>
-<button class="nav" data-p="cast">📢 Broadcast</button><button class="nav" data-p="set">⚙️ Settings</button>
+<button class="nav" data-p="cast">📢 Broadcast</button><button class="nav" data-p="set">⚙️ Settings</button><button class="nav" data-p="clones">🤖 Clone Bots</button>
 <a class="nav" href="/" style="text-decoration:none">🌐 Website</a><div class="side-foot">Developed by RIZO</div></div>
 <div id="main"><div id="top"><button class="a b" onclick="$('side').classList.toggle('open')">☰ Menu</button><b>RIZO HostBot</b></div>
 <h2 id="ttl"></h2><div class="sub" id="st"></div><div id="view"></div></div><div id="toast"></div>
@@ -1751,15 +1842,16 @@ async function act(b){try{const r=await fetch('/admin/action',{method:'POST',hea
 document.querySelectorAll('button.nav').forEach(b=>b.onclick=()=>{P=b.dataset.p;document.querySelectorAll('button.nav').forEach(x=>x.classList.toggle('on',x==b));$('side').classList.remove('open');render()});
 const card=(l,n)=>`<div class="card"><div class="n">${esc(n)}</div><div class="l">${l}</div></div>`;
 function bots(){return `<div class="box wrap"><table><tr><th>User</th><th>File</th><th>Type</th><th>Start</th><th></th></tr>`+(D.running.map(r=>`<tr><td>${r.owner}</td><td>${esc(r.file)}</td><td>${esc(r.type)}</td><td>${esc(r.since)}</td><td><button class="a r" onclick='act({action:"stop_script",key:${JSON.stringify(r.key)}})'>Stop</button></td></tr>`).join('')||'<tr><td colspan=5>Koi bot nahi chal raha</td></tr>')+`</table></div>`}
-function render(){if(!D)return;const T={over:'Overview',bots:'Running Bots',files:'All Files',users:'Users',cast:'Broadcast',set:'Settings'};$('ttl').textContent=T[P];
+function render(){if(!D)return;const T={over:'Overview',bots:'Running Bots',files:'All Files',users:'Users',cast:'Broadcast',set:'Settings',clones:'Clone Bots'};$('ttl').textContent=T[P];
 $('st').textContent=(D.locked?'🔒 Maintenance mode':'✅ Bot active')+' • uptime '+D.uptime+' • auto-refresh 15s';let h='';
 if(P=='over'){const mx=Math.max(1,...D.joins7.map(x=>x[1])),tt=Math.max(1,...Object.values(D.types));
-h=`<div class="grid">${card('👥 Total Members',D.total_users)}${card('🆕 New today',D.new_today)}${card('🔥 Active 24h',D.active24)}${card('🟢 Bots running',D.running_now)}${card('📁 Files',D.total_files)}${card('🚫 Banned',D.banned)}${card('👑 Admins',D.admins)}${card('📤 Uploads',D.uploads)}${card('📥 Downloads',D.downloads)}${card('▶️ Script runs',D.runs)}${card('🧠 RAM MB',D.ram_mb)}${card('⚙️ CPU %',D.cpu)}</div>
+h=`<div class="grid">${card('👥 Total Members',D.total_users)}${card('🆕 New today',D.new_today)}${card('🔥 Active 24h',D.active24)}${card('🟢 Bots running',D.running_now)}${card('🤖 Total clones',D.clone_total||0)}${card('📁 Files',D.total_files)}${card('🚫 Banned',D.banned)}${card('👑 Admins',D.admins)}${card('📤 Uploads',D.uploads)}${card('📥 Downloads',D.downloads)}${card('▶️ Script runs',D.runs)}${card('🧠 RAM MB',D.ram_mb)}${card('⚙️ CPU %',D.cpu)}</div>
 <div class="two"><div class="box"><b>📈 Naye members (7 din)</b><div class="bars">${D.joins7.map(x=>`<div class="bc"><i>${x[1]}</i><div class="bar" style="height:${8+x[1]/mx*80}px"></div><small>${x[0]}</small></div>`).join('')}</div></div>
 <div class="box"><b>🗂 File types</b>${Object.entries(D.types).map(([k,v])=>`<div class="hb"><span>${esc(k)}</span><div><div style="width:${v/tt*100}%"></div></div><em>${v}</em></div>`).join('')||'<p class="sub">Abhi koi file nahi</p>'}
 <b style="display:block;margin-top:14px">🏆 Top users (files)</b>${D.top.map(t=>`<div class="hb"><span>${t[0]}</span><div><div style="width:${t[1]/Math.max(1,D.top[0][1])*100}%"></div></div><em>${t[1]}</em></div>`).join('')||'<p class="sub">-</p>'}</div></div>
 <h3>🤖 Abhi chal rahe bots</h3>`+bots()}
 if(P=='bots')h=bots();
+if(P=='clones')h=`<div class="box"><b>🤖 Clone Bots (${D.clone_total||0})</b><div class="wrap"><table><tr><th>Bot</th><th>Bot ID</th><th>Owner ID</th><th>Developer</th><th>Status</th><th>Actions</th></tr>`+(D.clone_bots||[]).map(c=>`<tr><td>@${esc(c.username)}</td><td>${c.bot_id}</td><td>${c.owner_id}</td><td>${esc(c.developer||'-')}</td><td>${esc(c.status)}</td><td><button class="a r" onclick="act({action:'clone_stop',bot_id:${c.bot_id}})">Stop</button> <button class="a g" onclick="act({action:'clone_start',bot_id:${c.bot_id}})">Start</button></td></tr>`).join('')+`</table></div></div>`;
 if(P=='files')h=`<input placeholder="🔍 File ya user ID search..." value="${esc(Q)}" oninput="Q=this.value;render()" style="margin-bottom:10px"><div class="box wrap"><table><tr><th>User</th><th>File</th><th>Type</th><th>Status</th></tr>`+(D.files_list.filter(f=>(f.name+f.owner).toLowerCase().includes(Q.toLowerCase())).map(f=>`<tr><td>${f.owner}</td><td>${esc(f.name)}</td><td>${esc(f.type)}</td><td><span class="tag ${f.on?'t-on':'t-off'}">${f.on?'Running':'Stopped'}</span></td></tr>`).join('')||'<tr><td colspan=4>Koi file nahi</td></tr>')+`</table></div>`;
 if(P=='users')h=`<input placeholder="🔍 User ID search..." value="${esc(Q)}" oninput="Q=this.value;render()" style="margin-bottom:10px"><div class="box wrap"><table><tr><th>User ID</th><th>Joined</th><th>Last active</th><th>Files</th><th>Run</th><th>Tags</th><th></th></tr>`+(D.users.filter(u=>String(u.id).includes(Q)).map(u=>`<tr><td>${u.id}</td><td>${esc(u.joined)}</td><td>${esc(u.last)}</td><td>${u.files}</td><td>${u.running}</td><td>${u.banned?'🚫':''}${u.admin?'👑':''}</td><td>${u.banned?`<button class="a g" onclick="act({action:'unban',user_id:${u.id}})">Unban</button>`:`<button class="a r" onclick="act({action:'ban',user_id:${u.id}})">Ban</button>`} <button class="a" onclick="act({action:'stop_user',user_id:${u.id}})">Stop bots</button></td></tr>`).join('')||'<tr><td colspan=7>Koi user nahi</td></tr>')+`</table></div>`;
 if(P=='cast')h=`<div class="box"><b>📢 Saare users ko message</b><textarea id="bc" rows="5" placeholder="Message likho..." style="margin:10px 0"></textarea><button class="a b" onclick="cast()">Send to all users</button></div>`;
@@ -1870,6 +1962,7 @@ async def main():
     logger.info("🚀 Starting Advanced File Host Bot...")
     
     asyncio.create_task(web_server())
+    asyncio.create_task(clone_manager.restore())
     asyncio.create_task(keep_alive())
     
     await dp.start_polling(bot)

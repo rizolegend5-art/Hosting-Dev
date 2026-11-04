@@ -1,5 +1,8 @@
 [phases.setup]
-nixPkgs = ["python3", "gcc"]
+nixPkgs = ["python311", "nodejs_20", "gcc"]
+
+[phases.install]
+cmds = ["python -m pip install --upgrade pip", "pip install -r requirements.txt"]
 
 [start]
-cmd = "python3 bot.py"
+cmd = "python bot.py"
