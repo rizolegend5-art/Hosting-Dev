@@ -5,4 +5,4 @@ nixPkgs = ["python3", "python3Packages.pip", "gcc"]
 cmds = ["python3 -m pip install --no-cache-dir -r requirements.txt"]
 
 [phases.start]
-cmds = ["python3 bot.py"]
+cmds = ["python3 config.py"]
