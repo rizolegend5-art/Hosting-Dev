@@ -1,8 +1,6 @@
-[phases.setup]
-nixPkgs = ["python3", "python3Packages.pip", "gcc"]
+[phases.setup] nixPkgs = ["python3", "python3Packages.pip", "gcc"]
 
-[phases.install]
-cmds = ["python3 -m pip install --no-cache-dir -r requirements.txt"]
+[phases.install] cmds = ["pip install --no-cache-dir -r requirements.txt"]
 
-[start]
-cmd = "python3 main.py"
+[start] cmd = "python3 main.py"
+
