@@ -1,12 +1,10 @@
 {
-  "$schema": "https://railway.app/railway.schema.json",
+  "$schema": "https://railway.com/railway.schema.json",
   "build": {
-    "builder": "Procfile"
+    "builder": "RAILPACK"
   },
   "deploy": {
     "startCommand": "python main.py",
-    "healthcheckPath": "/health",
-    "healthcheckTimeout": 120,
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }
