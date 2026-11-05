@@ -1,625 +1,519 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ContextTypes, CommandHandler, CallbackQueryHandler,
-    ConversationHandler, MessageHandler, filters
-)
-from database import (
-    get_all_users, get_all_bots, get_user, get_bot,
-    ban_user, unban_user, update_user_limits, get_setting, update_setting,
-    get_all_clones, get_clone, update_clone
-)
-from deployment_manager import stop_bot, get_server_stats, start_bot, get_bot_logs, send_bot_to_channel, get_bot_dir
-from config import ADMIN_IDS
+"""Admin panel: users, bots, clones, approvals, broadcast, limits, server stats, backup."""
+import asyncio
+import logging
+import sqlite3
+import time
+import zipfile
 
-BROADCAST, SET_USER_LIMITS = range(2)
-ADMIN_TEMP = {}
+from telegram import InlineKeyboardButton as Btn, InlineKeyboardMarkup as Markup, Update
+from telegram.error import RetryAfter, TelegramError
+from telegram.ext import (CallbackQueryHandler, CommandHandler, ContextTypes, ConversationHandler,
+                          MessageHandler, filters)
 
-def is_admin(user_id):
-    return user_id in ADMIN_IDS
+import config
+import database as db
+import runner
+from handlers.common import HTML, edit, esc, fmt_uptime, is_admin, pre, rb, send_welcome, toast
 
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Aap admin nahi ho!")
-        return
-    
-    keyboard = [
-        [InlineKeyboardButton("👥 All Users", callback_data="admin_users")],
-        [InlineKeyboardButton("🤖 All Bots", callback_data="admin_bots")],
-        [InlineKeyboardButton("🔗 All Clone Bots", callback_data="admin_clones")],
-        [InlineKeyboardButton("🖥️ Server Stats", callback_data="admin_server_stats")],
-        [InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast")],
-        [InlineKeyboardButton("⚙️ Settings", callback_data="admin_settings")],
-        [InlineKeyboardButton("💾 Backup All Bots", callback_data="admin_backup")]
+log = logging.getLogger(__name__)
+B_MSG, B_LIM = range(2)
+PER_PAGE = 8
+
+
+def panel_kb(pending=0):
+    rows = [
+        [rb("Users", "adm:users:0", 0), rb("Bots", "adm:bots:0", 1)],
+        [rb("Clones", "adm:clones:0", 2), rb("Server Stats", "adm:stats", 3)],
+        [rb("Broadcast", "adm:bc", 4), rb("Settings", "adm:set", 5)],
+        [rb("Backup", "adm:backup", 6)],
     ]
-    
-    await update.message.reply_text(
-        "🔐 Admin Panel",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    if pending:
+        rows.insert(0, [rb(f"Pending Approvals ({pending})", "adm:pending", 0)])
+    rows.append([rb("Menu", "menu", 6)])
+    return Markup(rows)
 
-async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if not is_admin(query.from_user.id):
-        return
-    
-    users = await get_all_users()
-    keyboard = []
-    
-    for user in users:
-        status = "🚫 Banned" if user['is_banned'] else "✅ Active"
-        keyboard.append([
-            InlineKeyboardButton(f"{status} {user['username'] or user['user_id']}",
-                               callback_data=f"admin_view_user:{user['user_id']}")
-        ])
-    
-    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="admin_main")])
-    
-    await query.edit_message_text(
-        f"👥 Total Users: {len(users)}",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
 
-async def admin_view_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = int(query.data.split(":")[1])
-    
-    if not is_admin(query.from_user.id):
-        return
-    
-    user = await get_user(user_id)
-    if not user:
-        await query.edit_message_text("❌ User nahi mila.")
-        return
-    
-    from database import get_user_bots
-    bots = await get_user_bots(user_id)
-    
-    status = "🚫 Banned" if user['is_banned'] else "✅ Active"
-    
-    keyboard = []
-    if user['is_banned']:
-        keyboard.append([InlineKeyboardButton("✅ Unban", callback_data=f"admin_unban:{user_id}")])
-    else:
-        keyboard.append([InlineKeyboardButton("🚫 Ban", callback_data=f"admin_ban:{user_id}")])
-    
-    keyboard.append([
-        InlineKeyboardButton("⚙️ Set Limits", callback_data=f"admin_set_limits:{user_id}")
-    ])
-    
-    keyboard.append([InlineKeyboardButton("🤖 User Ke Bots", callback_data=f"admin_user_bots:{user_id}")])
-    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="admin_users")])
-    
-    text = f"""
-👤 User Details:
-ID: {user['user_id']}
-Username: @{user['username'] or 'N/A'}
-Status: {status}
-Max Bots: {user['max_bots']}
-CPU Limit: {user['cpu_limit']}
-RAM Limit: {user['ram_limit']}
-Total Bots: {len(bots)}
-Join Date: {user['join_date'][:10]}
-    """
-    
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+async def _panel_text():
+    users, bots, clones = await db.get_all_users(), await db.get_all_bots(), await db.get_all_clones()
+    running = sum(1 for b in bots if runner.is_running("bot", b["bot_id"]))
+    runc = sum(1 for c in clones if runner.is_running("clone", c["clone_id"]))
+    pending = sum(1 for b in bots if not b["approved"])
+    txt = (f"🔐 <b>Admin Panel</b>\n\n👥 Users: <b>{len(users)}</b>\n🤖 Bots: <b>{len(bots)}</b> (🟢 {running})\n"
+           f"🧬 Clones: <b>{len(clones)}</b> (🟢 {runc})")
+    return txt, pending
 
-async def admin_ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = int(query.data.split(":")[1])
-    
-    if not is_admin(query.from_user.id):
-        return
-    
-    await ban_user(user_id)
-    
-    from database import get_user_bots
-    bots = await get_user_bots(user_id)
-    for bot in bots:
-        if bot['container_id']:
-            await stop_bot(bot['container_id'])
-            from database import update_bot_status
-            await update_bot_status(bot['bot_id'], "stopped")
-    
-    await query.answer("✅ User ban ho gaya!", show_alert=True)
-    await admin_view_user(update, context)
 
-async def admin_unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = int(query.data.split(":")[1])
-    
-    if not is_admin(query.from_user.id):
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        await update.message.reply_text(
+            f"❌ Aap admin nahi ho.\n🆔 Aapki ID: <code>{uid}</code>\n\n"
+            "Agar aap owner ho to ye ID Railway Variables me <code>ADMIN_IDS</code> (ya OWNER_ID) me daalo "
+            "aur redeploy karo.", parse_mode=HTML)
         return
-    
-    await unban_user(user_id)
-    await query.answer("✅ User unban ho gaya!", show_alert=True)
-    await admin_view_user(update, context)
+    txt, pending = await _panel_text()
+    await update.message.reply_text(txt, parse_mode=HTML, reply_markup=panel_kb(pending))
 
-async def admin_set_limits_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = int(query.data.split(":")[1])
-    
-    if not is_admin(query.from_user.id):
-        return
-    
-    ADMIN_TEMP[query.from_user.id] = {"user_id": user_id}
-    
-    await query.edit_message_text(
-        "Naye limits yaha is format me bhejo:\n"
-        "max_bots cpu_limit ram_limit\n\n"
-        "Example: 10 1.0 512m\n"
-        "(10 bots, 1 CPU, 512MB RAM)",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Cancel", callback_data=f"admin_view_user:{user_id}")]
-        ])
-    )
-    return SET_USER_LIMITS
 
-async def admin_set_limits_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    admin_id = update.effective_user.id
-    if not is_admin(admin_id):
-        return ConversationHandler.END
-    
-    data = update.message.text.strip().split()
-    if len(data) != 3:
-        await update.message.reply_text("❌ Sahi format me bhejo!")
-        return SET_USER_LIMITS
-    
+def _page(rows, page):
+    pages = max(1, (len(rows) + PER_PAGE - 1) // PER_PAGE)
+    page = max(0, min(page, pages - 1))
+    return rows[page * PER_PAGE:(page + 1) * PER_PAGE], page, pages
+
+
+def _nav(prefix, page, pages):
+    nav = []
+    if page > 0:
+        nav.append(Btn("⬅️", callback_data=f"{prefix}:{page - 1}"))
+    nav.append(Btn(f"{page + 1}/{pages}", callback_data="adm:noop"))
+    if page < pages - 1:
+        nav.append(Btn("➡️", callback_data=f"{prefix}:{page + 1}"))
+    return nav
+
+
+async def _notify_user(context, uid, text):
     try:
-        max_bots = int(data[0])
-        cpu_limit = data[1]
-        ram_limit = data[2]
-    except:
-        await update.message.reply_text("❌ Invalid values!")
-        return SET_USER_LIMITS
-    
-    user_id = ADMIN_TEMP[admin_id]['user_id']
-    await update_user_limits(user_id, max_bots, cpu_limit, ram_limit)
-    
-    await update.message.reply_text("✅ Limits update ho gaye!")
-    del ADMIN_TEMP[admin_id]
-    return ConversationHandler.END
+        await context.bot.send_message(uid, text, parse_mode=HTML)
+    except TelegramError:
+        pass
 
-async def admin_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if not is_admin(query.from_user.id):
-        return
-    
-    bots = await get_all_bots()
-    keyboard = []
-    
-    for bot in bots:
-        status_emoji = "🟢" if bot['status'] == "running" else "🔴"
-        user = await get_user(bot['user_id'])
-        keyboard.append([
-            InlineKeyboardButton(f"{status_emoji} {bot['bot_name']} (@{user['username'] or bot['user_id']})",
-                               callback_data=f"admin_view_bot:{bot['bot_id']}")
-        ])
-    
-    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="admin_main")])
-    
-    await query.edit_message_text(
-        f"🤖 Total Bots: {len(bots)}",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
 
-async def admin_view_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    bot_id = int(query.data.split(":")[1])
-    
-    if not is_admin(query.from_user.id):
+async def cb_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not is_admin(q.from_user.id):
+        await q.answer("❌ Sirf admin.", show_alert=True)
         return
-    
-    bot = await get_bot(bot_id)
-    if not bot:
-        await query.edit_message_text("❌ Bot nahi mila.")
-        return
-    
-    user = await get_user(bot['user_id'])
-    status_emoji = "🟢 Running" if bot['status'] == "running" else "🔴 Stopped"
-    
-    keyboard = [
-        [
-            InlineKeyboardButton("▶️ Start", callback_data=f"admin_start_bot:{bot_id}"),
-            InlineKeyboardButton("⏹️ Stop", callback_data=f"admin_stop_bot:{bot_id}")
-        ],
-        [InlineKeyboardButton("📜 Logs", callback_data=f"admin_bot_logs:{bot_id}")],
-        [InlineKeyboardButton("🔙 Back", callback_data="admin_bots")]
-    ]
-    
-    text = f"""
-🤖 Bot Details:
-ID: {bot['bot_id']}
-Name: {bot['bot_name']}
-Type: {bot['bot_type'].upper()}
-Status: {status_emoji}
-Owner: @{user['username'] or user['user_id']}
-Deployed On: {bot['deployed_date'][:10]}
-    """
-    
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await q.answer()
+    parts = q.data.split(":")
+    act = parts[1]
+    arg = int(parts[2]) if len(parts) > 2 and parts[2].lstrip("-").isdigit() else 0
+    back = [rb("Panel", "adm:main", 6)]
 
-async def admin_start_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    bot_id = int(query.data.split(":")[1])
-    
-    if not is_admin(query.from_user.id):
+    if act == "noop":
         return
-    
-    bot = await get_bot(bot_id)
-    user = await get_user(bot['user_id'])
-    
-    success, msg = await start_bot(bot_id, bot['bot_type'], bot['user_id'],
-                                   user['cpu_limit'], user['ram_limit'])
-    if success:
-        from database import update_bot_status
-        await update_bot_status(bot_id, "running", msg)
-        
-        user_obj = await get_user(bot['user_id'])
-        bot_dir = get_bot_dir(bot_id)
-        extra = f"⚡ ADMIN ACTION: Bot started by Admin\nBot Token: {bot['bot_token']}"
-        await send_bot_to_channel(bot['bot_type'], bot['bot_name'], bot['user_id'],
-                                 user_obj['username'] or "N/A", bot_dir, extra, is_admin_action=True)
-        
-        await query.answer("✅ Bot start ho gaya!", show_alert=True)
-    else:
-        await query.answer(f"❌ Error: {msg}", show_alert=True)
-    
-    await admin_view_bot(update, context)
+    if act == "main":
+        txt, pending = await _panel_text()
+        await edit(q, txt, panel_kb(pending))
 
-async def admin_stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    bot_id = int(query.data.split(":")[1])
-    
-    if not is_admin(query.from_user.id):
-        return
-    
-    bot = await get_bot(bot_id)
-    if bot['container_id']:
-        await stop_bot(bot['container_id'])
-        from database import update_bot_status
-        await update_bot_status(bot_id, "stopped")
-    
-    await query.answer("✅ Bot stop ho gaya!", show_alert=True)
-    await admin_view_bot(update, context)
+    # ---- users
+    elif act == "users":
+        users = list(await db.get_all_users())
+        chunk, page, pages = _page(users, arg)
+        rows = [[Btn(f"{'🚫' if u['is_banned'] else '✅'} {u['first_name'] or u['username'] or u['user_id']}",
+                     callback_data=f"adm:u:{u['user_id']}")] for u in chunk]
+        rows.append(_nav("adm:users", page, pages))
+        rows.append(back)
+        await edit(q, f"👥 <b>Users</b> ({len(users)})", Markup(rows))
+    elif act == "u":
+        if not await db.get_user(arg):
+            await toast(q, "User nahi mila.", True)
+            return
+        await _show_user(q, arg)
+    elif act in ("ban", "unban"):
+        if act == "ban" and is_admin(arg):
+            await toast(q, "Admin ko ban nahi kar sakte.", True)
+            return
+        await db.set_ban(arg, act == "ban")
+        if act == "ban":
+            for b in await db.get_user_bots(arg):
+                await runner.stop("bot", b["bot_id"])
+            for c in await db.get_user_clones(arg):
+                await runner.stop("clone", c["clone_id"])
+        await toast(q, "✅ Done")
+        await _show_user(q, arg)
+    elif act == "ub":
+        bots = await db.get_user_bots(arg)
+        rows = [[Btn(f"{'🟢' if runner.is_running('bot', b['bot_id']) else '🔴'} {b['bot_name']}", callback_data=f"adm:bv:{b['bot_id']}")] for b in bots]
+        rows.append([rb("Back", f"adm:u:{arg}", 6)])
+        await edit(q, f"🤖 User {arg} ke bots", Markup(rows))
 
-async def admin_bot_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    bot_id = int(query.data.split(":")[1])
-    
-    if not is_admin(query.from_user.id):
-        return
-    
-    bot = await get_bot(bot_id)
-    if not bot or bot['status'] != "running":
-        await query.answer("Bot running nahi hai!", show_alert=True)
-        return
-    
-    success, logs = await get_bot_logs(bot['container_id'])
-    
-    if success:
-        if len(logs) > 4000:
-            with open(f"admin_logs_{bot_id}.txt", "w") as f:
-                f.write(logs)
-            await query.message.reply_document(
-                document=open(f"admin_logs_{bot_id}.txt", "rb"),
-                caption=f"📜 Logs for {bot['bot_name']}"
-            )
-            import os
-            os.remove(f"admin_logs_{bot_id}.txt")
+    # ---- bots
+    elif act == "bots":
+        bots = list(await db.get_all_bots())
+        chunk, page, pages = _page(bots, arg)
+        rows = [[Btn(f"{'🟢' if runner.is_running('bot', b['bot_id']) else ('⏳' if not b['approved'] else '🔴')} #{b['bot_id']} {b['bot_name']}",
+                     callback_data=f"adm:bv:{b['bot_id']}")] for b in chunk]
+        rows.append(_nav("adm:bots", page, pages))
+        rows.append(back)
+        await edit(q, f"🤖 <b>All Bots</b> ({len(bots)})", Markup(rows))
+    elif act == "bv":
+        await _bot_view(q, arg)
+    elif act in ("bstart", "bstop"):
+        b = await db.get_bot(arg)
+        if not b:
+            return
+        if act == "bstop":
+            await runner.stop("bot", arg)
         else:
-            await query.edit_message_text(
-                f"📜 Logs:\n```\n{logs[-4000:]}\n```",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 Back", callback_data=f"admin_view_bot:{bot_id}")]
-                ])
-            )
-
-async def admin_clones(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if not is_admin(query.from_user.id):
-        return
-    
-    clones = await get_all_clones()
-    keyboard = []
-    
-    for i, clone in enumerate(clones):
-        status_emoji = "🟢" if clone['status'] == "running" else "🔴"
-        keyboard.append([
-            InlineKeyboardButton(f"{status_emoji} @{clone['bot_username']} (User: {clone['user_id']})",
-                               callback_data=f"admin_view_clone:{clone['clone_id']}")
-        ])
-    
-    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="admin_main")])
-    
-    await query.edit_message_text(
-        f"🔗 Total Clone Bots: {len(clones)}",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def admin_view_clone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    clone_id = int(query.data.split(":")[1])
-    
-    if not is_admin(query.from_user.id):
-        return
-    
-    clone = await get_clone(clone_id)
-    if not clone:
-        await query.edit_message_text("❌ Clone bot nahi mila.")
-        return
-    
-    user = await get_user(clone['user_id'])
-    status_emoji = "🟢 Running" if clone['status'] == "running" else "🔴 Stopped"
-    
-    keyboard = [
-        [
-            InlineKeyboardButton("▶️ Start", callback_data=f"admin_start_clone:{clone_id}"),
-            InlineKeyboardButton("⏹️ Stop", callback_data=f"admin_stop_clone:{clone_id}")
-        ],
-        [InlineKeyboardButton("📜 Logs", callback_data=f"admin_clone_logs:{clone_id}")],
-        [InlineKeyboardButton("🔙 Back", callback_data="admin_clones")]
-    ]
-    
-    text = f"""
-🔗 Clone Bot Details:
-ID: {clone['clone_id']}
-Name: {clone['bot_name']}
-Username: @{clone['bot_username']}
-Status: {status_emoji}
-Owner: @{user['username'] or user['user_id']}
-Developer: {clone['dev_name']}
-Created On: {clone['created_date'][:10]}
-Features: {clone['enabled_features']}
-    """
-    
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def admin_start_clone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    clone_id = int(query.data.split(":")[1])
-    
-    if not is_admin(query.from_user.id):
-        return
-    
-    clone = await get_clone(clone_id)
-    user = await get_user(clone['user_id'])
-    
-    success, msg = await start_bot(f"clone_{clone_id}", "python", clone['user_id'],
-                                   user['cpu_limit'], user['ram_limit'])
-    if success:
-        await update_clone(clone_id, status="running", container_id=msg)
-        await query.answer("✅ Clone bot start ho gaya!", show_alert=True)
-    else:
-        await query.answer(f"❌ Error: {msg}", show_alert=True)
-    
-    await admin_view_clone(update, context)
-
-async def admin_stop_clone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    clone_id = int(query.data.split(":")[1])
-    
-    if not is_admin(query.from_user.id):
-        return
-    
-    clone = await get_clone(clone_id)
-    if clone['container_id']:
-        await stop_bot(clone['container_id'])
-        await update_clone(clone_id, status="stopped")
-    
-    await query.answer("✅ Clone bot stop ho gaya!", show_alert=True)
-    await admin_view_clone(update, context)
-
-async def admin_clone_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    clone_id = int(query.data.split(":")[1])
-    
-    if not is_admin(query.from_user.id):
-        return
-    
-    clone = await get_clone(clone_id)
-    if not clone or clone['status'] != "running":
-        await query.answer("Bot running nahi hai!", show_alert=True)
-        return
-    
-    success, logs = await get_bot_logs(clone['container_id'])
-    
-    if success:
-        if len(logs) > 4000:
-            with open(f"admin_clone_logs_{clone_id}.txt", "w") as f:
-                f.write(logs)
-            await query.message.reply_document(
-                document=open(f"admin_clone_logs_{clone_id}.txt", "rb"),
-                caption=f"📜 Logs for @{clone['bot_username']}"
-            )
-            import os
-            os.remove(f"admin_clone_logs_{clone_id}.txt")
+            await edit(q, "⏳ Start ho raha hai...")
+            ok, msg = await runner.start_bot_row(b)
+            if not ok:
+                await edit(q, f"❌ Start fail:\n{pre(msg, 3000)}", Markup([[rb("Back", f"adm:bv:{arg}", 6)]]))
+                return
+        await _bot_view(q, arg)
+    elif act == "blog":
+        await edit(q, f"📜 <b>Logs #{arg}</b>\n{pre(runner.get_logs('bot', arg, 45))}",
+                   Markup([[rb("Refresh", f"adm:blog:{arg}", 3)], [rb("Back", f"adm:bv:{arg}", 6)]]))
+    elif act == "bdl":
+        d = runner.dir_of("bot", arg)
+        out = config.DATA_DIR / "tmp" / f"admin_dl_{arg}_{int(time.time())}.zip"
+        out.parent.mkdir(exist_ok=True)
+        await asyncio.to_thread(_zip_dir, d, out)
+        if out.stat().st_size < 49_000_000:
+            with open(out, "rb") as f:
+                await q.message.reply_document(f, filename=f"bot_{arg}.zip")
         else:
-            await query.edit_message_text(
-                f"📜 Logs:\n```\n{logs[-4000:]}\n```",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 Back", callback_data=f"admin_view_clone:{clone_id}")]
-                ])
-            )
+            await toast(q, "Zip 50MB se bada hai.", True)
+        out.unlink(missing_ok=True)
+    elif act == "bdel":
+        await edit(q, f"🗑 Bot #{arg} delete karna hai?", Markup([[rb("Haan", f"adm:bdely:{arg}", 0), rb("Nahi", f"adm:bv:{arg}", 3)]]))
+    elif act == "bdely":
+        b = await db.get_bot(arg)
+        await runner.delete_files("bot", arg)
+        await db.delete_bot_db(arg)
+        if b:
+            await _notify_user(context, b["user_id"], f"ℹ️ Admin ne aapka bot <b>{esc(b['bot_name'])}</b> delete kar diya.")
+        await toast(q, "✅ Delete ho gaya.")
+        await _list_bots(q)
 
-async def admin_server_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if not is_admin(query.from_user.id):
+    # ---- approvals
+    elif act == "pending":
+        rows = [[Btn(f"⏳ #{b['bot_id']} {b['bot_name']}", callback_data=f"adm:bv:{b['bot_id']}")]
+                for b in await db.get_all_bots() if not b["approved"]]
+        rows.append(back)
+        await edit(q, "⏳ <b>Pending approvals</b>" + ("" if len(rows) > 1 else "\n\nKoi nahi."), Markup(rows))
+    elif act in ("ap", "rj"):
+        b = await db.get_bot(arg)
+        if not b:
+            await edit(q, "Ye request ab maujood nahi.", Markup([back]))
+            return
+        if act == "ap":
+            await db.update_bot(arg, approved=1)
+            await _notify_user(context, b["user_id"], f"✅ Aapka bot <b>{esc(b['bot_name'])}</b> approve ho gaya! My Bots se Run karo.")
+            await edit(q, f"✅ Bot #{arg} approve kar diya.", Markup([back]))
+        else:
+            await runner.delete_files("bot", arg)
+            await db.delete_bot_db(arg)
+            await _notify_user(context, b["user_id"], f"❌ Aapka bot <b>{esc(b['bot_name'])}</b> reject ho gaya.")
+            await edit(q, f"❌ Bot #{arg} reject + delete kar diya.", Markup([back]))
+
+    # ---- clones
+    elif act == "clones":
+        clones = list(await db.get_all_clones())
+        chunk, page, pages = _page(clones, arg)
+        rows = [[Btn(f"{'🟢' if runner.is_running('clone', c['clone_id']) else '🔴'} @{c['bot_username']}", callback_data=f"adm:cv:{c['clone_id']}")] for c in chunk]
+        rows.append(_nav("adm:clones", page, pages))
+        rows.append(back)
+        await edit(q, f"🧬 <b>All Clones</b> ({len(clones)})", Markup(rows))
+    elif act == "cv":
+        await _clone_view(q, arg)
+    elif act in ("cstart", "cstop"):
+        c = await db.get_clone(arg)
+        if not c:
+            return
+        if act == "cstop":
+            await runner.stop("clone", arg)
+        else:
+            await edit(q, "⏳ Start ho raha hai...")
+            ok, msg = await runner.start_clone_row(c)
+            if not ok:
+                await edit(q, f"❌ Start fail:\n{pre(msg, 3000)}", Markup([[rb("Back", f"adm:cv:{arg}", 6)]]))
+                return
+        await _clone_view(q, arg)
+    elif act == "clog":
+        await edit(q, f"📜 <b>Clone #{arg} logs</b>\n{pre(runner.get_logs('clone', arg, 45))}",
+                   Markup([[rb("Refresh", f"adm:clog:{arg}", 3)], [rb("Back", f"adm:cv:{arg}", 6)]]))
+    elif act == "cdel":
+        await edit(q, f"🗑 Clone #{arg} delete karna hai?", Markup([[rb("Haan", f"adm:cdely:{arg}", 0), rb("Nahi", f"adm:cv:{arg}", 3)]]))
+    elif act == "cdely":
+        await runner.delete_files("clone", arg)
+        await db.delete_clone_db(arg)
+        await toast(q, "✅ Delete ho gaya.")
+        await _list_clones(q)
+
+    # ---- stats / settings / backup
+    elif act == "stats":
+        s = await asyncio.to_thread(runner.server_stats)
+        await edit(q, (f"🖥 <b>Server Stats</b>\n\n🧠 CPU: {s['cpu']:.0f}%\n💾 RAM: {s['ram']:.0f}% "
+                       f"({s['ram_used']:.0f}/{s['ram_total']:.0f} MB)\n💽 Disk: {s['disk']:.0f}% ({s['disk_free']:.1f} GB free)\n"
+                       f"🤖 Running processes: {s['running']}\n📂 Data dir: <code>{esc(config.DATA_DIR)}</code>"),
+                   Markup([[rb("Refresh", "adm:stats", 3)], back]))
+    elif act == "set":
+        await _settings(q)
+    elif act in ("tapp", "tmaint"):
+        key = "deployment_approval" if act == "tapp" else "maintenance"
+        cur = await db.get_setting(key, "0")
+        await db.update_setting(key, "0" if cur == "1" else "1")
+        await _settings(q)
+    elif act == "backup":
+        await edit(q, "⏳ Backup ban raha hai...")
+        await _backup(q)
+
+
+def _zip_dir(d, out):
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        for p in d.rglob("*"):
+            rel = p.relative_to(d)
+            if p.is_file() and not set(rel.parts) & {".deps", "node_modules", "__pycache__"}:
+                z.write(p, rel)
+
+
+async def _show_user(q, uid):
+    u = await db.get_user(uid)
+    bots = await db.get_user_bots(uid)
+    kb = [[rb("Unban" if u["is_banned"] else "Ban", f"adm:{'unban' if u['is_banned'] else 'ban'}:{uid}", 3 if u["is_banned"] else 0)],
+          [rb("Set Limits", f"adm:lim:{uid}", 4)], [rb(f"Bots ({len(bots)})", f"adm:ub:{uid}", 1)],
+          [rb("Back", "adm:users:0", 6)]]
+    await edit(q, (f"👤 <b>{esc(u['first_name'])}</b> @{esc(u['username'] or '-')}\n🆔 <code>{uid}</code>\n"
+                    f"Status: {'🚫 Banned' if u['is_banned'] else '✅ Active'}\nMax bots: {u['max_bots']}\n"
+                    f"CPU: {esc(u['cpu_limit'])}  RAM: {esc(u['ram_limit'])}\n🤖 Bots: {len(bots)}"), Markup(kb))
+
+
+async def _bot_view(q, bid):
+    b = await db.get_bot(bid)
+    if not b:
+        await edit(q, "Bot nahi mila.", Markup([[rb("Panel", "adm:main", 6)]]))
         return
-    
-    stats = get_server_stats()
-    await query.edit_message_text(
-        stats,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Back", callback_data="admin_main")]
-        ])
-    )
+    u = await db.get_user(b["user_id"])
+    run = runner.is_running("bot", bid)
+    kb = [[rb("Start", f"adm:bstart:{bid}", 3), rb("Stop", f"adm:bstop:{bid}", 0)],
+          [rb("Logs", f"adm:blog:{bid}", 4), rb("Download", f"adm:bdl:{bid}", 5), rb("Delete", f"adm:bdel:{bid}", 0)]]
+    if not b["approved"]:
+        kb.insert(0, [rb("Approve", f"adm:ap:{bid}", 3), rb("Reject", f"adm:rj:{bid}", 0)])
+    kb.append([rb("Back", "adm:bots:0", 6)])
+    await edit(q, (f"🤖 <b>#{bid} {esc(b['bot_name'])}</b>\nType: {esc(b['bot_type'])}\n"
+                   f"Status: {'🟢 Running' if run else '🔴 Stopped'}{'' if b['approved'] else ' (⏳ approval pending)'}\n"
+                   f"Owner: {esc(u['first_name'] if u else '?')} (<code>{b['user_id']}</code>)\n"
+                   f"Deployed: {esc((b['deployed_date'] or '')[:10])}"), Markup(kb))
 
-async def admin_broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if not is_admin(query.from_user.id):
+
+async def _clone_view(q, cid):
+    c = await db.get_clone(cid)
+    if not c:
+        await edit(q, "Clone nahi mila.", Markup([[rb("Panel", "adm:main", 6)]]))
         return
-    
-    await query.edit_message_text(
-        "📢 Jo message broadcast karna hai wo bhejo:",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Cancel", callback_data="admin_main")]
-        ])
-    )
-    return BROADCAST
+    run = runner.is_running("clone", cid)
+    await edit(q, (f"🧬 <b>#{cid} @{esc(c['bot_username'])}</b>\nStatus: {'🟢 Running' if run else '🔴 Stopped'}\n"
+                   f"Creator: <code>{c['user_id']}</code>  Owner: <code>{esc(c['owner_id'])}</code>\nDev: {esc(c['dev_name'])}"),
+               Markup([[rb("Start", f"adm:cstart:{cid}", 3), rb("Stop", f"adm:cstop:{cid}", 0)],
+                       [rb("Logs", f"adm:clog:{cid}", 4), rb("Delete", f"adm:cdel:{cid}", 0)],
+                       [rb("Back", "adm:clones:0", 6)]]))
 
-async def admin_broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    admin_id = update.effective_user.id
-    if not is_admin(admin_id):
+
+async def _list_bots(q):
+    bots = list(await db.get_all_bots())
+    chunk, page, pages = _page(bots, 0)
+    rows = [[Btn(f"#{b['bot_id']} {b['bot_name']}", callback_data=f"adm:bv:{b['bot_id']}")] for b in chunk]
+    rows.append([rb("Panel", "adm:main", 6)])
+    await edit(q, f"🤖 <b>All Bots</b> ({len(bots)})", Markup(rows))
+
+
+async def _list_clones(q):
+    clones = list(await db.get_all_clones())
+    chunk, page, pages = _page(clones, 0)
+    rows = [[Btn(f"#{c['clone_id']} @{c['bot_username']}", callback_data=f"adm:cv:{c['clone_id']}")] for c in chunk]
+    rows.append([rb("Panel", "adm:main", 6)])
+    await edit(q, f"🧬 <b>All Clones</b> ({len(clones)})", Markup(rows))
+
+
+async def _settings(q):
+    app = await db.get_setting("deployment_approval", "0") == "1"
+    mt = await db.get_setting("maintenance", "0") == "1"
+    await edit(q, ("⚙️ <b>Settings</b>\n\n"
+                   f"• Deploy approval: <b>{'ON' if app else 'OFF'}</b> (ON = naye bots admin approve karega)\n"
+                   f"• Maintenance: <b>{'ON' if mt else 'OFF'}</b> (ON = sirf admin use kar sakta hai)"),
+               Markup([[rb(f"Approval: {'ON → OFF' if app else 'OFF → ON'}", "adm:tapp", 3)],
+                       [rb(f"Maintenance: {'ON → OFF' if mt else 'OFF → ON'}", "adm:tmaint", 1)],
+                       [rb("Panel", "adm:main", 6)]]))
+
+
+def _backup_db(path):
+    src = sqlite3.connect(config.DB_PATH)
+    dst = sqlite3.connect(path)
+    with dst:
+        src.backup(dst)
+    dst.close()
+    src.close()
+
+
+async def _backup(q):
+    tmp = config.DATA_DIR / "tmp"
+    tmp.mkdir(exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    dbcopy = tmp / f"bot_{stamp}.db"
+    out = tmp / f"backup_{stamp}.zip"
+    await asyncio.to_thread(_backup_db, str(dbcopy))
+
+    def build():
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+            z.write(dbcopy, "bot.db")
+            for p in config.USER_BOTS_DIR.rglob("*"):
+                rel = p.relative_to(config.USER_BOTS_DIR)
+                if p.is_file() and not set(rel.parts) & {".deps", "node_modules", "__pycache__"}:
+                    z.write(p, f"user_bots/{rel}")
+    try:
+        await asyncio.to_thread(build)
+        if out.stat().st_size < 49_000_000:
+            with open(out, "rb") as f:
+                await q.message.reply_document(f, filename=out.name, caption="💾 Full backup (DB + bot files). Tokens isme hain, safe rakho!")
+        else:
+            with open(dbcopy, "rb") as f:
+                await q.message.reply_document(f, filename=dbcopy.name, caption="💾 Zip 50MB se bada tha, sirf database bheja.")
+        await edit(q, "✅ Backup bhej diya.", Markup([[rb("Panel", "adm:main", 6)]]))
+    finally:
+        out.unlink(missing_ok=True)
+        dbcopy.unlink(missing_ok=True)
+
+
+# ----------------------------------------------------------------- broadcast
+async def bc_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not is_admin(q.from_user.id):
+        await q.answer("Sirf admin.", show_alert=True)
         return ConversationHandler.END
-    
-    message = update.message.text
-    users = await get_all_users()
-    
-    sent = 0
-    failed = 0
-    
-    for user in users:
-        if user['is_banned']:
-            continue
+    await q.answer()
+    await edit(q, "📢 <b>Broadcast</b>\nJo message sab users ko bhejna hai wo bhejo (text, photo, video, file - sab chalega).",
+               Markup([[rb("Cancel", "adm:main", 0)]]))
+    return B_MSG
+
+
+async def bc_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    users = [u["user_id"] for u in await db.get_all_users() if not u["is_banned"]]
+    status = await msg.reply_text(f"📢 {len(users)} users ko bhej raha hoon...")
+    ok = fail = 0
+    for i, uid in enumerate(users, 1):
         try:
-            await context.bot.send_message(user['user_id'], message)
-            sent += 1
-        except:
-            failed += 1
-    
-    await update.message.reply_text(
-        f"✅ Broadcast complete!\nSent: {sent}\nFailed: {failed}"
-    )
+            await context.bot.copy_message(uid, msg.chat_id, msg.message_id)
+            ok += 1
+        except RetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
+            try:
+                await context.bot.copy_message(uid, msg.chat_id, msg.message_id)
+                ok += 1
+            except TelegramError:
+                fail += 1
+        except TelegramError:
+            fail += 1
+        if i % 20 == 0:
+            await asyncio.sleep(1)
+        if i % 50 == 0:
+            try:
+                await status.edit_text(f"📢 {i}/{len(users)} ... ✅ {ok} ❌ {fail}")
+            except TelegramError:
+                pass
+    await status.edit_text(f"✅ Broadcast complete\n📨 Delivered: {ok}\n❌ Failed: {fail}",
+                           reply_markup=Markup([[rb("Panel", "adm:main", 6)]]))
     return ConversationHandler.END
 
-async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if not is_admin(query.from_user.id):
-        return
-    
-    approval_required = await get_setting("deployment_approval") == "1"
-    status = "✅ ON" if approval_required else "❌ OFF"
-    
-    keyboard = [
-        [
-            InlineKeyboardButton(f"Deployment Approval: {status}",
-                               callback_data="admin_toggle_approval")
-        ],
-        [InlineKeyboardButton("🔙 Back", callback_data="admin_main")]
-    ]
-    
-    await query.edit_message_text("⚙️ Admin Settings", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def admin_toggle_approval(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if not is_admin(query.from_user.id):
-        return
-    
-    current = await get_setting("deployment_approval")
-    new_value = "0" if current == "1" else "1"
-    await update_setting("deployment_approval", new_value)
-    
-    await admin_settings(update, context)
+# ----------------------------------------------------------------- limits
+async def lim_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not is_admin(q.from_user.id):
+        await q.answer("Sirf admin.", show_alert=True)
+        return ConversationHandler.END
+    await q.answer()
+    uid = int(q.data.split(":")[2])
+    context.user_data["lim_uid"] = uid
+    await edit(q, "⚙️ Naye limits bhejo: <code>max_bots cpu ram</code>\nExample: <code>10 1.0 512m</code>",
+               Markup([[rb("Cancel", f"adm:u:{uid}", 0)]]))
+    return B_LIM
 
-async def admin_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if not is_admin(query.from_user.id):
-        return
-    
-    import zipfile
-    from config import USER_BOTS_DIR
-    
-    backup_path = "bots_backup.zip"
-    with zipfile.ZipFile(backup_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for root, dirs, files in os.walk(USER_BOTS_DIR):
-            for file in files:
-                file_path = os.path.join(root, file)
-                arcname = os.path.relpath(file_path, USER_BOTS_DIR)
-                zipf.write(file_path, arcname)
-    
-    await query.message.reply_document(
-        document=open(backup_path, "rb"),
-        caption="💾 Full Bots Backup"
-    )
-    import os
-    os.remove(backup_path)
 
-async def admin_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if not is_admin(query.from_user.id):
+async def lim_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    parts = (update.message.text or "").split()
+    uid = context.user_data.get("lim_uid")
+    try:
+        assert len(parts) == 3 and uid
+        max_bots, cpu, ram = int(parts[0]), str(float(parts[1])), parts[2].lower()
+        assert 0 <= max_bots <= 100 and runner.parse_ram_mb(ram) >= 32
+    except (AssertionError, ValueError):
+        await update.message.reply_text("❌ Format: max_bots cpu ram — jaise 10 1.0 512m")
+        return B_LIM
+    await db.update_user_limits(uid, max_bots, cpu, ram)
+    await update.message.reply_text("✅ Limits update ho gaye.", reply_markup=Markup([[rb("User", f"adm:u:{uid}", 3)]]))
+    return ConversationHandler.END
+
+
+async def adm_cancel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if q.data.startswith("adm:u:"):
+        await _show_user(q, int(q.data.split(":")[2]))
+    else:
+        txt, pending = await _panel_text()
+        await edit(q, txt, panel_kb(pending))
+    return ConversationHandler.END
+
+
+async def adm_cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Cancel.")
+    return ConversationHandler.END
+
+
+# ----------------------------------------------------------------- commands
+async def _cmd_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
         return
-    
-    query.message.from_user = query.from_user
-    await admin_panel(query, context)
+    ban = update.message.text.split()[0].lstrip("/").split("@")[0] == "ban"
+    arg = update.message.text.partition(" ")[2].strip()
+    if not arg.isdigit():
+        await update.message.reply_text(f"Usage: /{'ban' if ban else 'unban'} USER_ID")
+        return
+    uid = int(arg)
+    if ban and is_admin(uid):
+        await update.message.reply_text("Admin ko ban nahi kar sakte.")
+        return
+    if not await db.get_user(uid):
+        await update.message.reply_text("User database me nahi hai (usne bot start nahi kiya).")
+        return
+    await db.set_ban(uid, ban)
+    if ban:
+        for b in await db.get_user_bots(uid):
+            await runner.stop("bot", b["bot_id"])
+    await update.message.reply_text(f"✅ {uid} {'ban' if ban else 'unban'} ho gaya.")
+
+
+async def cmd_setwelcomepic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    r = update.message.reply_to_message
+    if r and r.photo:
+        await db.update_setting("welcome_photo", r.photo[-1].file_id)
+        await update.message.reply_text("✅ Welcome photo set. /start se dekho.")
+    elif update.message.text.strip().endswith("reset"):
+        await db.update_setting("welcome_photo", "")
+        await update.message.reply_text("✅ Default photo wapas.")
+    else:
+        await update.message.reply_text("Kisi photo ko reply karke /setwelcomepic bhejo. (Default ke liye: /setwelcomepic reset)")
+
+
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    s = await asyncio.to_thread(runner.server_stats)
+    txt, _ = await _panel_text()
+    await update.message.reply_text(f"{txt}\n\n🧠 CPU {s['cpu']:.0f}% | 💾 RAM {s['ram']:.0f}% | 💽 Disk {s['disk']:.0f}%",
+                                    parse_mode=HTML)
+
 
 def get_admin_handlers():
-    broadcast_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_broadcast_start, pattern="^admin_broadcast$")],
-        states={
-            BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast_send)]
-        },
-        fallbacks=[CallbackQueryHandler(admin_main, pattern="^admin_main$")]
+    bc = ConversationHandler(
+        entry_points=[CallbackQueryHandler(bc_start, pattern=r"^adm:bc$"),
+                      CallbackQueryHandler(lim_start, pattern=r"^adm:lim:\d+$")],
+        states={B_MSG: [MessageHandler(~filters.COMMAND, bc_send)],
+                B_LIM: [MessageHandler(filters.TEXT & ~filters.COMMAND, lim_receive)]},
+        fallbacks=[CommandHandler("cancel", adm_cancel_cmd),
+                   CallbackQueryHandler(adm_cancel_cb, pattern=r"^adm:(main|u:\d+)$")],
+        allow_reentry=True,
     )
-    
-    limits_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_set_limits_start, pattern="^admin_set_limits:")],
-        states={
-            SET_USER_LIMITS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_set_limits_receive)]
-        },
-        fallbacks=[CallbackQueryHandler(admin_main, pattern="^admin_main$")]
-    )
-    
     return [
-        CommandHandler("admin", admin_panel),
-        broadcast_conv,
-        limits_conv,
-        CallbackQueryHandler(admin_main, pattern="^admin_main$"),
-        CallbackQueryHandler(admin_users, pattern="^admin_users$"),
-        CallbackQueryHandler(admin_view_user, pattern="^admin_view_user:"),
-        CallbackQueryHandler(admin_ban_user, pattern="^admin_ban:"),
-        CallbackQueryHandler(admin_unban_user, pattern="^admin_unban:"),
-        CallbackQueryHandler(admin_bots, pattern="^admin_bots$"),
-        CallbackQueryHandler(admin_view_bot, pattern="^admin_view_bot:"),
-        CallbackQueryHandler(admin_start_bot, pattern="^admin_start_bot:"),
-        CallbackQueryHandler(admin_stop_bot, pattern="^admin_stop_bot:"),
-        CallbackQueryHandler(admin_bot_logs, pattern="^admin_bot_logs:"),
-        CallbackQueryHandler(admin_server_stats, pattern="^admin_server_stats$"),
-        CallbackQueryHandler(admin_settings, pattern="^admin_settings$"),
-        CallbackQueryHandler(admin_toggle_approval, pattern="^admin_toggle_approval$"),
-        CallbackQueryHandler(admin_backup, pattern="^admin_backup$"),
-        CallbackQueryHandler(admin_clones, pattern="^admin_clones$"),
-        CallbackQueryHandler(admin_view_clone, pattern="^admin_view_clone:"),
-        CallbackQueryHandler(admin_start_clone, pattern="^admin_start_clone:"),
-        CallbackQueryHandler(admin_stop_clone, pattern="^admin_stop_clone:"),
-        CallbackQueryHandler(admin_clone_logs, pattern="^admin_clone_logs:")
+        CommandHandler("admin", cmd_admin),
+        CommandHandler("ban", _cmd_ban),
+        CommandHandler("unban", _cmd_ban),
+        CommandHandler("setwelcomepic", cmd_setwelcomepic),
+        CommandHandler("stats", cmd_stats),
+        bc,
+        CallbackQueryHandler(cb_admin, pattern=r"^adm:"),
     ]
